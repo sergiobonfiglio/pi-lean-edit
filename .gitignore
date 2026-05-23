@@ -1,0 +1,9 @@
+# Local editor config
+.vscode/
+
+# Local installs for this standalone extension
+node_modules/
+
+# Smart-edit metrics when PI_SMART_EDIT_METRICS_PATH points inside repo
+metrics.json
+metrics.json.*.tmp
