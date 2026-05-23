@@ -5,7 +5,11 @@
   "type": "module",
   "keywords": ["pi-package", "pi", "extension", "smart-edit"],
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "pack:dry": "npm pack --dry-run",
+    "release:check": "npm run check && npm run test && npm run pack:dry",
+    "publish:public": "npm publish --access public"
   },
   "pi": {
     "extensions": ["./index.ts"]
