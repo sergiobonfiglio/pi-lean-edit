@@ -38,3 +38,22 @@ test("truncateAfter discards edited range and following lines", () => {
   assert.equal(store.covered("/tmp/a", 20, 20), undefined);
   assert.equal(store.covered("/tmp/a", 10, 20), undefined);
 });
+
+test("column snapshots tracked separately", () => {
+  const store = new SnapshotStore();
+  store.setColumns({ path: "/tmp/a", readAt: 1, line: 3, startColumn: 10, endColumn: 20, text: "abcdefghijk", lineLength: 100, lineEnding: "\n", hugeLine: true });
+  store.setColumns({ path: "/tmp/a", readAt: 2, line: 3, startColumn: 30, endColumn: 35, text: "uvwxyz", lineLength: 100, lineEnding: "\n", hugeLine: true });
+  assert.equal(store.covered("/tmp/a", 3, 3), undefined);
+  assert.equal(store.coveredColumns("/tmp/a", 3, 12, 18)?.text, "abcdefghijk");
+  assert.equal(store.coveredColumns("/tmp/a", 3, 31, 34)?.text, "uvwxyz");
+  assert.equal(store.coveredColumns("/tmp/a", 3, 21, 29), undefined);
+});
+
+test("truncateAfter drops column snapshots after kept line", () => {
+  const store = new SnapshotStore();
+  store.setColumns({ path: "/tmp/a", readAt: 1, line: 3, startColumn: 1, endColumn: 5, text: "abcde", lineLength: 20, lineEnding: "\n", hugeLine: true });
+  store.setColumns({ path: "/tmp/a", readAt: 1, line: 5, startColumn: 1, endColumn: 5, text: "fghij", lineLength: 20, lineEnding: "\n", hugeLine: true });
+  store.truncateAfter("/tmp/a", 3);
+  assert.ok(store.coveredColumns("/tmp/a", 3, 1, 5));
+  assert.equal(store.coveredColumns("/tmp/a", 5, 1, 5), undefined);
+});

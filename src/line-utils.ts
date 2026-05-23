@@ -68,3 +68,24 @@ export function lineCount(text: string): number {
 export function formatNumberedLines(lines: string[], startLine: number): string {
   return lines.map((line, i) => `${startLine + i} │ ${line}`).join("\n");
 }
+
+export function codePoints(text: string): string[] {
+  return Array.from(text);
+}
+
+export function codePointLength(text: string): number {
+  return codePoints(text).length;
+}
+
+export function sliceColumns(text: string, startColumn: number, endColumn: number): string {
+  return codePoints(text).slice(startColumn - 1, endColumn).join("");
+}
+
+export function replaceColumns(text: string, startColumn: number, endColumn: number, newText: string): string {
+  const cps = codePoints(text);
+  return [...cps.slice(0, startColumn - 1), newText, ...cps.slice(endColumn)].join("");
+}
+
+export function formatColumnLine(line: number, startColumn: number, endColumn: number, text: string): string {
+  return `${line}:${startColumn}-${endColumn} │ ${text}`;
+}

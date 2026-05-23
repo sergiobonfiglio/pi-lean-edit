@@ -25,11 +25,17 @@ function renderSmartReadCall(args: any, theme: any, context: any) {
   text += theme.fg("accent", args?.path ?? "");
   const summary = context?.state?.smartReadSummary;
   if (summary && summary.path === args?.path) {
-    text += theme.fg("dim", `:${summary.startLine}-${summary.endLine}`);
+    const suffix = summary.startColumn != null && summary.endColumn != null
+      ? `:${summary.startLine}:${summary.startColumn}-${summary.endColumn}`
+      : `:${summary.startLine}-${summary.endLine}`;
+    text += theme.fg("dim", suffix);
   } else if (args?.offset != null) {
     const start = Number(args.offset);
-    const end = args?.limit != null ? start + Number(args.limit) - 1 : undefined;
-    text += theme.fg("dim", `:${start}${end != null ? `-${end}` : ""}`);
+    if (args?.columnOffset != null) text += theme.fg("dim", `:${start}:${Number(args.columnOffset)}`);
+    else {
+      const end = args?.limit != null ? start + Number(args.limit) - 1 : undefined;
+      text += theme.fg("dim", `:${start}${end != null ? `-${end}` : ""}`);
+    }
   }
 
   if (summary && summary.path === args?.path) text += theme.fg("success", ` ${formatLineCount(Number(summary.linesShown ?? 0))}`);
@@ -64,12 +70,16 @@ function renderSmartEditCall(args: any, theme: any, context: any) {
     ? args.edits.map((edit: any) => {
       const start = edit?.startLine;
       const end = edit?.endLine ?? start;
-      return start != null ? `${start}${end !== start ? `-${end}` : ""}` : null;
+      if (start == null) return null;
+      const linePart = `${start}${end !== start ? `-${end}` : ""}`;
+      return edit?.startColumn != null && edit?.endColumn != null ? `${linePart}:${edit.startColumn}-${edit.endColumn}` : linePart;
     }).filter(Boolean)
     : (() => {
       const start = args?.startLine;
       const end = args?.endLine ?? start;
-      return start != null ? [`${start}${end !== start ? `-${end}` : ""}`] : [];
+      if (start == null) return [];
+      const linePart = `${start}${end !== start ? `-${end}` : ""}`;
+      return [args?.startColumn != null && args?.endColumn != null ? `${linePart}:${args.startColumn}-${args.endColumn}` : linePart];
     })();
   if (ranges.length) text += theme.fg("dim", `:${ranges.join(",")}`);
 
@@ -117,17 +127,19 @@ function statsLine(snapshot: SmartEditMetricsSnapshot): string {
 export default function (pi: ExtensionAPI) {
   const config = {
     maxLines: Number(process.env.PI_SMART_EDIT_MAX_READ_LINES ?? 2000),
-    maxBytes: Number(process.env.PI_SMART_EDIT_MAX_READ_BYTES ?? 50_000)
+    maxBytes: Number(process.env.PI_SMART_EDIT_MAX_READ_BYTES ?? 50_000),
+    maxColumns: Number(process.env.PI_SMART_EDIT_MAX_READ_COLUMNS ?? 400)
   };
   const metrics = new SmartEditMetricsStore();
 
   pi.registerTool({
     name: "read",
     label: "read",
-    description: "Read text file contents with line numbers.",
-    promptSnippet: "Read file contents with line numbers.",
+    description: "Read text file contents with line numbers or line-column windows for huge lines.",
+    promptSnippet: "Read file contents with line numbers. Use columnOffset/columnLimit for huge single lines.",
     promptGuidelines: [
-      "read: use offset/limit to inspect exact lines you may edit."
+      "read: use offset/limit to inspect exact lines you may edit.",
+      "read: use columnOffset for huge single lines; continuation stays on same line until done."
     ],
     parameters: smartReadSchema,
     renderShell: "default",
@@ -146,11 +158,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "edit",
     label: "edit",
-    description: "Edit a text file by one or more 1-based inclusive line ranges.",
-    promptSnippet: "Edit lines: { path, startLine, endLine?, newText } or { path, edits: [...] }.",
+    description: "Edit text file by one or more 1-based inclusive line ranges or single-line column ranges.",
+    promptSnippet: "Edit lines or columns: { path, startLine, endLine?, startColumn?, endColumn?, newText } or { path, edits: [...] }.",
     promptGuidelines: [
       "edit: use after read for same file/ranges; if stale/range-miss, read again.",
-      "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes."
+      "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes.",
+      "edit: column edits stay within one line; huge-line column edits require matching column snapshot."
     ],
     parameters: smartEditSchema,
     renderShell: "default",
@@ -193,7 +206,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: use read before edit. edit applies one or more 1-based inclusive line ranges; stale/range-miss means read again. newText: \"\" deletes. /smart-edit-stats shows metrics."
+      systemPrompt: event.systemPrompt + "\n\nSmart editing: use read before edit. read supports offset/limit and columnOffset/columnLimit for huge single lines. edit applies one or more 1-based inclusive line ranges or single-line column ranges; stale/range-miss means read again. newText: \"\" deletes. /smart-edit-stats shows metrics."
     };
   });
 }
