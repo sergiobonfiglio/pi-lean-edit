@@ -34,10 +34,10 @@ Show stats:
 
 ## Install
 
-Place repo at:
+Install from a local checkout by linking the repo into Pi's extensions directory:
 
 ```text
-~/.pi/agent/extensions/pi-smart-edit
+~/.pi/agent/extensions/pi-smart-edit -> /path/to/pi-smart-edit
 ```
 
 Then reload Pi:
