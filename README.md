@@ -1,7 +1,8 @@
 # pi-smart-edit
 
-Pi extension that replaces built-in `read`/`edit` with snapshot-verified range editing. 
-The idea is coming from an @antirez's video: https://www.youtube.com/watch?v=1HTtYNaCtcM.
+Safer, cheaper edits by verifying prior reads in the harness instead of the prompt.
+
+`pi-smart-edit` lets the harness verify the model already read the latest text it wants to edit, reducing stale-edit failures without resending old text in edit requests and without the per-read overhead of hash-decorated output.
 
 ## Tools
 
