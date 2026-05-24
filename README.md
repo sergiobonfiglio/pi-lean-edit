@@ -4,24 +4,24 @@ Safer, cheaper edits by verifying prior reads in the harness instead of the prom
 
 `pi-smart-edit` lets the harness verify the model already read the latest text it wants to edit, reducing stale-edit failures without resending old text in edit requests and without the per-read overhead of hash-decorated output.
 
-## Install or test locally
+## Install or test
 
-Install from npm:
+Install permanently:
 
 ```bash
 pi install npm:pi-smart-edit
 ```
 
-Test from a local checkout without installing:
+Test without installing permanently:
 
 ```bash
-pi --no-extensions -e ~/repositories/pi-extensions/pi-smart-edit
+pi --no-extensions -e npm:pi-smart-edit
 ```
 
-To test it alongside your normal setup, omit `--no-extensions`:
+To load it alongside your normal setup:
 
 ```bash
-pi -e ~/repositories/pi-extensions/pi-smart-edit
+pi -e npm:pi-smart-edit
 ```
 
 ## Tools
