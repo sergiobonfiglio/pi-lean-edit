@@ -1,6 +1,7 @@
 # pi-smart-edit
 
-Pi extension that replaces built-in `read`/`edit` with snapshot-verified range editing.
+Pi extension that replaces built-in `read`/`edit` with snapshot-verified range editing. 
+The idea is coming from an @antirez's video: https://www.youtube.com/watch?v=1HTtYNaCtcM.
 
 ## Tools
 
