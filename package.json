@@ -4,6 +4,16 @@
   "description": "Pi extension adding snapshot-verified range edits for read/edit.",
   "type": "module",
   "keywords": ["pi-package", "pi", "extension", "smart-edit"],
+  "exports": "./index.ts",
+  "files": ["index.ts", "src", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sergiobonfiglio/pi-smart-edit.git"
+  },
+  "homepage": "https://github.com/sergiobonfiglio/pi-smart-edit#readme",
+  "bugs": {
+    "url": "https://github.com/sergiobonfiglio/pi-smart-edit/issues"
+  },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts",
