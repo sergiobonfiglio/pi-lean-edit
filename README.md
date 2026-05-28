@@ -60,11 +60,6 @@ Show stats:
 npm test
 ```
 
-## Test
-
-```bash
-npm test
-```
 
 ## Notes
 
