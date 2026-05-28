@@ -221,6 +221,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Edit lines or columns: { path, startLine, endLine?, startColumn?, endColumn?, newText } or { path, edits: [...] }.",
     promptGuidelines: [
       "edit: use after read for same file/ranges; if stale/range-miss, read again.",
+      "edit: after success, edited ranges are invalidated; same-line-count edits keep unaffected later snapshots.",
       "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes.",
       "edit: column edits stay within one line; huge-line column edits require matching column snapshot."
     ],
@@ -265,7 +266,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: use read before edit. read supports offset/limit and columnOffset/columnLimit for huge single lines. edit applies one or more 1-based inclusive line ranges or single-line column ranges; stale/range-miss means read again. newText: \"\" deletes. /smart-edit-stats shows metrics."
+      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; use offset/limit and columnOffset/columnLimit as needed. Same-line-count edits keep unaffected later snapshots; stale/range-miss means read again. newText: \"\" deletes."
     };
   });
 }

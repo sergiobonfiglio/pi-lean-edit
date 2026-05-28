@@ -146,6 +146,24 @@ function verifyCoverage(edit: NormalizedEdit, coverage: SnapshotCoverage, realLi
   if (expected !== actual) throw new Error("file stale, read again");
 }
 
+function keepsSameLineCount(edit: NormalizedEdit): boolean {
+  if (edit.startColumn != null && edit.endColumn != null) return true;
+  return replacementLines(edit.newText).length === (edit.endLine - edit.startLine + 1);
+}
+
+function invalidateSnapshotsAfterEdit(store: SnapshotStore, path: string, edits: NormalizedEdit[]): void {
+  const firstLineCountChange = edits.find((edit) => !keepsSameLineCount(edit));
+  if (!firstLineCountChange) {
+    store.invalidateRanges(path, edits.map(({ startLine, endLine }) => ({ startLine, endLine })));
+    return;
+  }
+  store.truncateAfter(path, firstLineCountChange.startLine - 1);
+  const preservedPrefixEdits = edits
+    .filter((edit) => edit.endLine < firstLineCountChange.startLine)
+    .map(({ startLine, endLine }) => ({ startLine, endLine }));
+  if (preservedPrefixEdits.length) store.invalidateRanges(path, preservedPrefixEdits);
+}
+
 export async function smartEdit(cwd: string, input: SmartEditInput, store: SnapshotStore = snapshotStore): Promise<SmartEditResult> {
   const edits = normalizeEdits(input);
   const full = await resolveCanonicalPath(cwd, input.path);
@@ -202,7 +220,7 @@ export async function smartEdit(cwd: string, input: SmartEditInput, store: Snaps
 
     const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline);
     await fs.writeFile(full, after, "utf8");
-    store.truncateAfter(full, edits[0]!.startLine - 1);
+    invalidateSnapshotsAfterEdit(store, full, edits);
 
     const diff = unifiedDiff(input.path, before, after);
     const delta = multiSuccessDelta(parts);

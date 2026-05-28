@@ -1,6 +1,6 @@
 {
   "name": "pi-smart-edit",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Safer, cheaper edits by verifying prior reads in the harness instead of the prompt. Lets the harness verify the model already read the latest text it wants to edit, avoiding old-text replay and hash-decorated reads.",
   "type": "module",
   "keywords": [
