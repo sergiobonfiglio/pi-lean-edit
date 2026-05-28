@@ -1,4 +1,5 @@
 import type { LineEnding } from "./line-utils.ts";
+import { sliceColumns } from "./line-utils.ts";
 
 export type FileSnapshot = {
   path: string;
@@ -72,6 +73,44 @@ function segmentCoversColumns(segment: ColumnSnapshotSegment, startColumn: numbe
   return segment.startColumn <= startColumn && segment.endColumn >= endColumn;
 }
 
+function columnSegmentSlice(segment: ColumnSnapshotSegment, startColumn: number, endColumn: number): ColumnSnapshotSegment {
+  return {
+    ...segment,
+    startColumn,
+    endColumn,
+    text: sliceColumns(segment.text, startColumn - segment.startColumn + 1, endColumn - segment.startColumn + 1)
+  };
+}
+
+function canMergeColumnSegments(a: ColumnSnapshotSegment, b: ColumnSnapshotSegment): boolean {
+  return a.line === b.line &&
+    a.lineEnding === b.lineEnding &&
+    a.hugeLine === b.hugeLine &&
+    a.lineLength === b.lineLength &&
+    b.startColumn <= a.endColumn + 1;
+}
+
+function mergeAdjacentColumns(segments: ColumnSnapshotSegment[]): ColumnSnapshotSegment[] {
+  const sorted = [...segments].sort((a, b) => a.line - b.line || a.startColumn - b.startColumn || a.readAt - b.readAt);
+  const merged: ColumnSnapshotSegment[] = [];
+  for (const segment of sorted) {
+    const prev = merged.at(-1);
+    if (!prev || !canMergeColumnSegments(prev, segment)) {
+      merged.push(cloneColumnSegment(segment));
+      continue;
+    }
+    if (segment.endColumn <= prev.endColumn) {
+      prev.readAt = Math.max(prev.readAt, segment.readAt);
+      continue;
+    }
+    const tailStart = Math.max(prev.endColumn + 1, segment.startColumn);
+    prev.text += sliceColumns(segment.text, tailStart - segment.startColumn + 1, segment.endColumn - segment.startColumn + 1);
+    prev.endColumn = segment.endColumn;
+    prev.readAt = Math.max(prev.readAt, segment.readAt);
+  }
+  return merged;
+}
+
 export class SnapshotStore {
   private files = new Map<string, FileMemory>();
 
@@ -93,7 +132,15 @@ export class SnapshotStore {
 
   setColumns(snapshot: ColumnSnapshot): void {
     const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, segments: [], columnSegments: [] };
-    const next = memory.columnSegments.filter((segment) => !(segment.line === snapshot.line && !(segment.endColumn < snapshot.startColumn || segment.startColumn > snapshot.endColumn)));
+    const next: ColumnSnapshotSegment[] = [];
+    for (const segment of memory.columnSegments) {
+      if (segment.line !== snapshot.line || segment.endColumn < snapshot.startColumn || segment.startColumn > snapshot.endColumn) {
+        next.push(cloneColumnSegment(segment));
+        continue;
+      }
+      if (segment.startColumn < snapshot.startColumn) next.push(columnSegmentSlice(segment, segment.startColumn, snapshot.startColumn - 1));
+      if (segment.endColumn > snapshot.endColumn) next.push(columnSegmentSlice(segment, snapshot.endColumn + 1, segment.endColumn));
+    }
     next.push({
       readAt: snapshot.readAt,
       line: snapshot.line,
@@ -104,8 +151,7 @@ export class SnapshotStore {
       lineEnding: snapshot.lineEnding,
       hugeLine: snapshot.hugeLine
     });
-    next.sort((a, b) => a.line - b.line || a.startColumn - b.startColumn || a.readAt - b.readAt);
-    memory.columnSegments = next;
+    memory.columnSegments = mergeAdjacentColumns(next);
     this.files.set(snapshot.path, memory);
   }
 
@@ -133,6 +179,37 @@ export class SnapshotStore {
 
   delete(path: string): void {
     this.files.delete(path);
+  }
+
+  invalidateRanges(path: string, ranges: Array<{ startLine: number; endLine: number }>): void {
+    const memory = this.files.get(path);
+    if (!memory || ranges.length === 0) return;
+    const next: SnapshotSegment[] = [];
+    for (const segment of memory.segments) {
+      let remaining: SnapshotSegment[] = [cloneSegment(segment)];
+      for (const range of ranges) {
+        const updated: SnapshotSegment[] = [];
+        for (const part of remaining) {
+          if (part.endLine < range.startLine || part.startLine > range.endLine) {
+            updated.push(part);
+            continue;
+          }
+          if (part.startLine < range.startLine) updated.push(segmentSlice(part, part.startLine, range.startLine - 1));
+          if (part.endLine > range.endLine) updated.push(segmentSlice(part, range.endLine + 1, part.endLine));
+        }
+        remaining = updated;
+        if (remaining.length === 0) break;
+      }
+      next.push(...remaining);
+    }
+    const nextColumns = memory.columnSegments
+      .filter((segment) => !ranges.some((range) => segment.line >= range.startLine && segment.line <= range.endLine))
+      .map(cloneColumnSegment);
+    if (next.length === 0 && nextColumns.length === 0) this.files.delete(path);
+    else {
+      memory.segments = mergeAdjacent(next);
+      memory.columnSegments = nextColumns;
+    }
   }
 
   truncateAfter(path: string, lastLineToKeep: number): void {

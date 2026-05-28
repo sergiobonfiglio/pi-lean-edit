@@ -29,20 +29,20 @@ pi -e npm:pi-smart-edit
 ### `read`
 
 ```ts
-{ path: string; offset?: number; limit?: number }
+{ path: string; offset?: number; limit?: number; columnOffset?: number; columnLimit?: number }
 ```
 
-Shows numbered text lines and stores shown ranges as in-memory snapshots for that file. Adjacent reads merge into wider covered ranges.
+Shows numbered text lines and stores shown ranges as in-memory snapshots for that file. Adjacent line reads merge into wider covered ranges. Huge single-line reads can continue with `columnOffset`/`columnLimit`; `columnOffset` is single-line only, so omit `limit` or set `limit=1`. Adjacent/overlapping huge-line column windows compose into wider column coverage.
 
 ### `edit`
 
 ```ts
-{ path: string; startLine: number; endLine?: number; newText: string }
+{ path: string; startLine: number; endLine?: number; startColumn?: number; endColumn?: number; newText: string }
 // or
-{ path: string; edits: Array<{ startLine: number; endLine?: number; newText: string }> }
+{ path: string; edits: Array<{ startLine: number; endLine?: number; startColumn?: number; endColumn?: number; newText: string }> }
 ```
 
-`edit` applies one or more non-overlapping inclusive ranges after `read` has shown those ranges for the same canonical file. If the file changed, it fails with `file stale, read again`.
+`edit` applies one or more non-overlapping inclusive ranges after `read` has shown those ranges for the same canonical file. If the file changed, it fails with `file stale, read again`. Normal-line column edits require a whole-line snapshot; huge-line column edits can use matching column snapshots. After a successful edit, edited ranges are invalidated. Same-line-count edits preserve unaffected later snapshots; line-count-changing edits invalidate later snapshots.
 
 ## Metrics
 
