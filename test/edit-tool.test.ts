@@ -16,6 +16,11 @@ async function tempFile(content: string): Promise<{ dir: string; file: string }>
 
 const config = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 };
 
+function readText(result: Awaited<ReturnType<typeof smartRead>>): string {
+  const first = result.content[0];
+  return first?.type === "text" ? first.text : "";
+}
+
 test("edit without read fails", async () => {
   const { dir, file } = await tempFile("a\nb\n");
   const store = new SnapshotStore();
@@ -155,11 +160,12 @@ test("multi-line read stops at huge line and stores column snapshot", async () =
   const { dir, file } = await tempFile(`one\ntwo\n${huge}\nfour\n`);
   const store = new SnapshotStore();
   const result = await smartRead(dir, { path: file, offset: 1, limit: 4 }, { maxLines: 2000, maxBytes: 35, maxColumns: 6 }, store);
-  assert.match(result.text, /1 │ one/);
-  assert.match(result.text, /2 │ two/);
-  assert.match(result.text, /3:1-6 │ x{6}/);
-  assert.doesNotMatch(result.text, /4 │ four/);
-  assert.match(result.text, /Continue with offset=3 columnOffset=7\./);
+  const text = readText(result);
+  assert.match(text, /1 │ one/);
+  assert.match(text, /2 │ two/);
+  assert.match(text, /3:1-6 │ x{6}/);
+  assert.doesNotMatch(text, /4 │ four/);
+  assert.match(text, /Continue with offset=3 columnOffset=7\./);
   assert.deepEqual(store.ranges(file), [{ startLine: 1, endLine: 2 }]);
   assert.deepEqual(store.columnRanges(file), [{ line: 3, startColumn: 1, endColumn: 6 }]);
 });
@@ -170,8 +176,9 @@ test("huge line continuation reads next column window", async () => {
   const store = new SnapshotStore();
   await smartRead(dir, { path: file }, { maxLines: 2000, maxBytes: 12, maxColumns: 5 }, store);
   const result = await smartRead(dir, { path: file, offset: 1, columnOffset: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 5 }, store);
-  assert.match(result.text, /1:6-10 │ fghij/);
-  assert.match(result.text, /Continue with offset=1 columnOffset=11\./);
+  const text = readText(result);
+  assert.match(text, /1:6-10 │ fghij/);
+  assert.match(text, /Continue with offset=1 columnOffset=11\./);
 });
 
 test("huge line column edit succeeds after reading target span", async () => {
@@ -268,7 +275,7 @@ test("read does not memorize partial first line as full-line snapshot", async ()
   const { dir, file } = await tempFile("abcdef\nnext\n");
   const store = new SnapshotStore();
   const result = await smartRead(dir, { path: file }, { maxLines: 2000, maxBytes: 8, maxColumns: 3 }, store);
-  assert.equal(result.details.smartRead.linesShown, 1);
+  assert.equal(result.details.smartRead?.linesShown, 1);
   assert.equal(result.details.truncation?.truncatedBy, "columns");
   assert.equal(result.details.truncation?.firstLineExceedsLimit, true);
   assert.deepEqual(store.ranges(file), []);

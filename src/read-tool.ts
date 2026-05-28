@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { formatDimensionNote, resizeImage } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { codePointLength, formatColumnLine, formatNumberedLines, isBinary, resolveCanonicalPath, sliceColumns, splitText } from "./line-utils.ts";
 import { type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
@@ -16,12 +17,21 @@ export type SmartReadConfig = {
   maxLines: number;
   maxBytes: number;
   maxColumns?: number;
+  autoResizeImages?: boolean;
 };
 
+type SmartReadDeps = {
+  resizeImageFn?: typeof resizeImage;
+};
+
+type SmartReadContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export type SmartReadResult = {
-  text: string;
+  content: SmartReadContent[];
   details: {
-    smartRead: {
+    smartRead?: {
       path: string;
       startLine: number;
       endLine: number;
@@ -96,12 +106,112 @@ function renderSummary(startLine: number, endLine: number, totalLines: number, t
   return `Showing lines ${range} of ${totalLines}${truncated ? " (truncated)" : ""}.`;
 }
 
-export async function smartRead(cwd: string, input: SmartReadInput, config: SmartReadConfig, store: SnapshotStore = snapshotStore): Promise<SmartReadResult> {
+function startsWith(buffer: Uint8Array, bytes: number[]): boolean {
+  if (buffer.length < bytes.length) return false;
+  return bytes.every((byte, index) => buffer[index] === byte);
+}
+
+function startsWithAscii(buffer: Uint8Array, offset: number, text: string): boolean {
+  if (buffer.length < offset + text.length) return false;
+  for (let index = 0; index < text.length; index++) {
+    if (buffer[offset + index] !== text.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function readUint32BE(buffer: Uint8Array, offset: number): number {
+  return ((buffer[offset] ?? 0) * 0x1000000 +
+    ((buffer[offset + 1] ?? 0) << 16) +
+    ((buffer[offset + 2] ?? 0) << 8) +
+    (buffer[offset + 3] ?? 0));
+}
+
+function isPng(buffer: Uint8Array): boolean {
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  return buffer.length >= 16 && startsWith(buffer, pngSignature) && readUint32BE(buffer, pngSignature.length) === 13 && startsWithAscii(buffer, 12, "IHDR");
+}
+
+function isAnimatedPng(buffer: Uint8Array): boolean {
+  const pngSignatureLength = 8;
+  let offset = pngSignatureLength;
+  while (offset + 8 <= buffer.length) {
+    const chunkLength = readUint32BE(buffer, offset);
+    const chunkTypeOffset = offset + 4;
+    if (startsWithAscii(buffer, chunkTypeOffset, "acTL")) return true;
+    if (startsWithAscii(buffer, chunkTypeOffset, "IDAT")) return false;
+    const nextOffset = offset + 8 + chunkLength + 4;
+    if (nextOffset <= offset || nextOffset > buffer.length) return false;
+    offset = nextOffset;
+  }
+  return false;
+}
+
+function isGif(buffer: Uint8Array): boolean {
+  return buffer.length >= 10 && (startsWithAscii(buffer, 0, "GIF87a") || startsWithAscii(buffer, 0, "GIF89a"));
+}
+
+function isWebP(buffer: Uint8Array): boolean {
+  return buffer.length >= 16 &&
+    startsWithAscii(buffer, 0, "RIFF") &&
+    startsWithAscii(buffer, 8, "WEBP") &&
+    (startsWithAscii(buffer, 12, "VP8 ") || startsWithAscii(buffer, 12, "VP8L") || startsWithAscii(buffer, 12, "VP8X"));
+}
+
+function detectSupportedImageMimeType(buffer: Uint8Array): string | null {
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (startsWith(buffer, [0xff, 0xd8, 0xff])) return buffer[3] === 0xf7 ? null : "image/jpeg";
+  if (startsWith(buffer, pngSignature)) return isPng(buffer) && !isAnimatedPng(buffer) ? "image/png" : null;
+  if (isGif(buffer)) return "image/gif";
+  if (isWebP(buffer)) return "image/webp";
+  return null;
+}
+
+function getNonVisionImageNote(model: { input?: string[] } | undefined): string | undefined {
+  if (!model || model.input?.includes("image")) return undefined;
+  return "[Current model does not support images. The image will be omitted from this request.]";
+}
+
+function buildImageReadText(mimeType: string, notes: Array<string | undefined>): string {
+  return [`Read image file [${mimeType}]`, ...notes.filter((note): note is string => Boolean(note))].join("\n");
+}
+
+function imageReadResult(text: string, image?: { data: string; mimeType: string }): SmartReadResult {
+  return {
+    content: image ? [{ type: "text", text }, { type: "image", data: image.data, mimeType: image.mimeType }] : [{ type: "text", text }],
+    details: {}
+  };
+}
+
+export async function smartRead(cwd: string, input: SmartReadInput, config: SmartReadConfig, store: SnapshotStore = snapshotStore, model?: { input?: string[] }, deps: SmartReadDeps = {}): Promise<SmartReadResult> {
   const full = await resolveCanonicalPath(cwd, input.path);
   const st = await fs.stat(full);
   if (st.isDirectory()) throw new Error(`Cannot read directory: ${input.path}`);
+
   const buf = await fs.readFile(full);
-  if (isBinary(buf)) throw new Error("smart read supports text only");
+  const imageMimeType = detectSupportedImageMimeType(buf);
+  const nonVisionImageNote = getNonVisionImageNote(model);
+  if (imageMimeType) {
+    if (config.autoResizeImages ?? true) {
+      const resized = await (deps.resizeImageFn ?? resizeImage)(buf, imageMimeType);
+      if (!resized) {
+        return imageReadResult(buildImageReadText(imageMimeType, [
+          "[Image omitted: could not be resized below the inline image size limit.]",
+          nonVisionImageNote
+        ]));
+      }
+      return imageReadResult(
+        buildImageReadText(resized.mimeType, [formatDimensionNote(resized), nonVisionImageNote]),
+        { data: resized.data, mimeType: resized.mimeType }
+      );
+    }
+
+    return imageReadResult(
+      buildImageReadText(imageMimeType, [nonVisionImageNote]),
+      { data: buf.toString("base64"), mimeType: imageMimeType }
+    );
+  }
+
+  if (isBinary(buf)) throw new Error("smart read supports text only, except supported images");
 
   const text = buf.toString("utf8");
   const parsed = splitText(text);
@@ -116,7 +226,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     if (startLine > parsed.lines.length) {
       const out = renderSummary(startLine, startLine - 1, parsed.lines.length, false);
       return {
-        text: out,
+        content: [{ type: "text", text: out }],
         details: {
           smartRead: { path: input.path, startLine, endLine: startLine - 1, linesShown: 0, totalLines: parsed.lines.length, truncated: false },
           truncation: {
@@ -159,7 +269,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     const next = truncated ? `Continue with offset=${startLine} columnOffset=${endColumn + 1}.` : "";
     const out = [numbered, summary, next].filter(Boolean).join("\n");
     return {
-      text: out,
+      content: [{ type: "text", text: out }],
       details: {
         smartRead: { path: input.path, startLine, endLine: startLine, linesShown: 1, totalLines: parsed.lines.length, truncated, startColumn, endColumn },
         truncation: {
@@ -251,7 +361,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
   const outputBytes = Buffer.byteLength(out, "utf8");
 
   return {
-    text: out,
+    content: [{ type: "text", text: out }],
     details: {
       smartRead: {
         path: input.path,

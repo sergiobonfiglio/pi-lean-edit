@@ -1,11 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
-import { smartRead, smartReadSchema } from "./read-tool.ts";
+import { Container, Text, getCapabilities, getImageDimensions, imageFallback } from "@earendil-works/pi-tui";
+import { smartRead, smartReadSchema, type SmartReadResult } from "./read-tool.ts";
 import { smartEdit, smartEditSchema } from "./edit-tool.ts";
 import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
 import { renderDiffForSmartEdit } from "./diff-render.ts";
-
 
 function mergeMetricsDetails(details: Record<string, any>, delta: SmartEditDelta, snapshot: SmartEditMetricsSnapshot): Record<string, any> {
   return { ...details, smartEditMetrics: { delta, snapshot } };
@@ -20,7 +19,42 @@ function diffStatMarks(count: number, mark: string, forceNumber = false): string
   return `${mark}${count}`;
 }
 
-function renderSmartReadCall(args: any, theme: any, context: any) {
+type SmartReadCallArgs = { path?: string; offset?: number; limit?: number; columnOffset?: number };
+
+type SmartEditCallArgs = {
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+  edits?: Array<{
+    startLine?: number;
+    endLine?: number;
+    startColumn?: number;
+    endColumn?: number;
+  }>;
+};
+
+type TextContent = { type: "text"; text: string };
+type ImageContent = { type: "image"; data: string; mimeType: string };
+type ToolContent = TextContent | ImageContent;
+type ToolResult<TDetails = Record<string, unknown>> = {
+  content?: ToolContent[];
+  details?: TDetails & Record<string, unknown>;
+  isError?: boolean;
+};
+
+type SmartReadRenderState = {
+  smartReadSummary?: NonNullable<SmartReadResult["details"]["smartRead"]>;
+  smartReadSummaryKey?: string;
+};
+
+type SmartEditRenderState = {
+  smartEditStat?: { added: number; removed: number };
+  smartEditSummaryKey?: string;
+};
+
+function renderSmartReadCall(args: SmartReadCallArgs, theme: any, context: { state: SmartReadRenderState }) {
   let text = theme.fg("toolTitle", theme.bold("read "));
   text += theme.fg("accent", args?.path ?? "");
   const summary = context?.state?.smartReadSummary;
@@ -42,14 +76,40 @@ function renderSmartReadCall(args: any, theme: any, context: any) {
   return new Text(text, 0, 0);
 }
 
-function renderSmartReadResult(result: any, { expanded, isPartial }: any, theme: any, context: any) {
-  if (isPartial) return new Text(theme.fg("warning", "Reading..."), 0, 0);
-  const item = result?.content?.[0];
-  if (item?.type !== "text") return new Container();
-  const text = item.text;
-  if (result?.isError) return new Text(theme.fg("error", text.split("\n")[0] ?? text), 0, 0);
+function dimLines(text: string, theme: any): Text {
+  return new Text(text.split("\n").map((line) => theme.fg("dim", line)).join("\n"), 0, 0);
+}
 
-  const summary = result?.details?.smartRead;
+function getTextItem(result: ToolResult): TextContent | undefined {
+  const item = result.content?.[0];
+  return item?.type === "text" ? item : undefined;
+}
+
+// Mirrors built-in read getTextOutput image fallback behavior when images are hidden/unsupported.
+function getSmartReadTextOutput(result: ToolResult, showImages: boolean): string {
+  if (!result) return "";
+  const content = result.content ?? [];
+  const textBlocks = content.filter((c): c is TextContent => c.type === "text");
+  const imageBlocks = content.filter((c): c is ImageContent => c.type === "image");
+  let output = textBlocks.map((c) => c.text.replace(/\r/g, "")).join("\n");
+  const caps = getCapabilities();
+  if (imageBlocks.length > 0 && (!caps.images || !showImages)) {
+    const fallbacks = imageBlocks.map((img) => {
+      const dims = getImageDimensions(img.data, img.mimeType) ?? undefined;
+      return imageFallback(img.mimeType, dims);
+    }).join("\n");
+    output = output ? `${output}\n${fallbacks}` : fallbacks;
+  }
+  return output;
+}
+
+function renderSmartReadResult(result: ToolResult<SmartReadResult["details"]>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { showImages: boolean; state: SmartReadRenderState; invalidate: () => void }) {
+  if (isPartial) return new Text(theme.fg("warning", "Reading..."), 0, 0);
+  const text = getSmartReadTextOutput(result, context.showImages);
+  if (!text) return new Container();
+  if (result.isError) return new Text(theme.fg("error", text.split("\n")[0] ?? text), 0, 0);
+
+  const summary = result.details?.smartRead;
   if (summary) {
     const stateKey = JSON.stringify([summary.path, summary.linesShown, summary.startLine, summary.endLine]);
     if (context.state.smartReadSummaryKey !== stateKey) {
@@ -60,27 +120,27 @@ function renderSmartReadResult(result: any, { expanded, isPartial }: any, theme:
   }
 
   if (!expanded) return new Container();
-  return new Text(text.split("\n").map((line: string) => theme.fg("dim", line)).join("\n"), 0, 0);
+  return dimLines(text, theme);
 }
 
-function renderSmartEditCall(args: any, theme: any, context: any) {
+function formatEditRange(edit: { startLine?: number; endLine?: number; startColumn?: number; endColumn?: number }): string | null {
+  const start = edit.startLine;
+  const end = edit.endLine ?? start;
+  if (start == null || end == null) return null;
+  const linePart = `${start}${end !== start ? `-${end}` : ""}`;
+  return edit.startColumn != null && edit.endColumn != null ? `${linePart}:${edit.startColumn}-${edit.endColumn}` : linePart;
+}
+
+function formatEditRanges(args: SmartEditCallArgs): string[] {
+  if (Array.isArray(args.edits)) return args.edits.map(formatEditRange).filter((range): range is string => Boolean(range));
+  const range = formatEditRange(args);
+  return range ? [range] : [];
+}
+
+function renderSmartEditCall(args: SmartEditCallArgs, theme: any, context: { state: SmartEditRenderState }) {
   let text = theme.fg("toolTitle", theme.bold("edit "));
   text += theme.fg("accent", args?.path ?? "");
-  const ranges = Array.isArray(args?.edits)
-    ? args.edits.map((edit: any) => {
-      const start = edit?.startLine;
-      const end = edit?.endLine ?? start;
-      if (start == null) return null;
-      const linePart = `${start}${end !== start ? `-${end}` : ""}`;
-      return edit?.startColumn != null && edit?.endColumn != null ? `${linePart}:${edit.startColumn}-${edit.endColumn}` : linePart;
-    }).filter(Boolean)
-    : (() => {
-      const start = args?.startLine;
-      const end = args?.endLine ?? start;
-      if (start == null) return [];
-      const linePart = `${start}${end !== start ? `-${end}` : ""}`;
-      return [args?.startColumn != null && args?.endColumn != null ? `${linePart}:${args.startColumn}-${args.endColumn}` : linePart];
-    })();
+  const ranges = formatEditRanges(args);
   if (ranges.length) text += theme.fg("dim", `:${ranges.join(",")}`);
 
   const stat = context?.state?.smartEditStat;
@@ -91,23 +151,22 @@ function renderSmartEditCall(args: any, theme: any, context: any) {
   return new Text(text, 0, 0);
 }
 
-function renderSmartEditResult(result: any, { expanded, isPartial }: any, theme: any, context: any) {
+function renderSmartEditResult(result: ToolResult<{ diff?: string; firstChangedLine?: number }>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { state: SmartEditRenderState; invalidate: () => void }) {
   if (isPartial) return new Text(theme.fg("warning", "Editing..."), 0, 0);
-  const item = result?.content?.[0];
-  if (item?.type !== "text") return new Text("", 0, 0);
+  const item = getTextItem(result);
+  if (!item) return new Text("", 0, 0);
   const text = item.text;
   const lines = text.split("\n");
-  if (result?.isError) {
+  if (result.isError) {
     const first = lines.shift() ?? text;
-    let rendered = theme.fg("error", first);
-    if (lines.length) rendered += "\n" + lines.map((line: string) => theme.fg("dim", line)).join("\n");
-    return new Text(rendered, 0, 0);
+    const rest = lines.length ? `\n${lines.map((line) => theme.fg("dim", line)).join("\n")}` : "";
+    return new Text(theme.fg("error", first) + rest, 0, 0);
   }
 
-  const diff = result?.details?.diff;
+  const diff = result.details?.diff;
   if (typeof diff === "string" && diff.length > 0) {
     const stat = diffStat(diff);
-    const stateKey = JSON.stringify([result?.details?.firstChangedLine, stat.added, stat.removed]);
+    const stateKey = JSON.stringify([result.details?.firstChangedLine, stat.added, stat.removed]);
     if (context.state.smartEditSummaryKey !== stateKey) {
       context.state.smartEditSummaryKey = stateKey;
       context.state.smartEditStat = stat;
@@ -135,8 +194,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "read",
     label: "read",
-    description: "Read text file contents with line numbers or line-column windows for huge lines.",
-    promptSnippet: "Read file contents with line numbers. Use columnOffset/columnLimit for huge single lines.",
+    description: "Read text file contents with line numbers or line-column windows for huge lines. Supports jpg, png, gif, and webp images as attachments.",
+    promptSnippet: "Read file contents with line numbers or supported images.",
     promptGuidelines: [
       "read: use offset/limit to inspect exact lines you may edit.",
       "read: use columnOffset for huge single lines; continuation stays on same line until done."
@@ -145,8 +204,8 @@ export default function (pi: ExtensionAPI) {
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        const result = await smartRead(ctx.cwd, params, config);
-        return { content: [{ type: "text", text: result.text }], details: result.details };
+        const result = await smartRead(ctx.cwd, params, config, undefined, ctx?.model);
+        return { content: result.content, details: result.details };
       } catch (e) {
         return { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }], isError: true, details: {} };
       }
