@@ -180,14 +180,14 @@ function renderSmartEditResult(result: ToolResult<{ diff?: string; firstChangedL
 }
 
 function statsLine(snapshot: SmartEditMetricsSnapshot): string {
-  return `smart_edit session saved=${snapshot.session.charsSaved} failure=${(snapshot.session.failureRate * 100).toFixed(1)}% global saved=${snapshot.global.charsSaved} failure=${(snapshot.global.failureRate * 100).toFixed(1)}%`;
+  return `lean_edit session saved=${snapshot.session.charsSaved} failure=${(snapshot.session.failureRate * 100).toFixed(1)}% global saved=${snapshot.global.charsSaved} failure=${(snapshot.global.failureRate * 100).toFixed(1)}%`;
 }
 
 export default function (pi: ExtensionAPI) {
   const config = {
-    maxLines: Number(process.env.PI_SMART_EDIT_MAX_READ_LINES ?? 2000),
-    maxBytes: Number(process.env.PI_SMART_EDIT_MAX_READ_BYTES ?? 50_000),
-    maxColumns: Number(process.env.PI_SMART_EDIT_MAX_READ_COLUMNS ?? 400)
+    maxLines: Number(process.env.PI_LEAN_EDIT_MAX_READ_LINES ?? 2000),
+    maxBytes: Number(process.env.PI_LEAN_EDIT_MAX_READ_BYTES ?? 50_000),
+    maxColumns: Number(process.env.PI_LEAN_EDIT_MAX_READ_COLUMNS ?? 400)
   };
   const metrics = new SmartEditMetricsStore();
 
@@ -251,8 +251,8 @@ export default function (pi: ExtensionAPI) {
     renderResult: renderSmartEditResult
   });
 
-  pi.registerCommand("smart-edit-stats", {
-    description: "Show smart edit session/global failure rate and saved characters.",
+  pi.registerCommand("lean-edit-stats", {
+    description: "Show lean edit session/global failure rate and saved characters.",
     handler: async (_args, ctx) => {
       ctx.ui.notify(formatSmartEditStats(metrics.snapshot()), "info");
     }

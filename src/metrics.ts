@@ -33,7 +33,7 @@ export type SmartEditDelta = {
 const ZERO: SmartEditCounters = Object.freeze({ attempts: 0, failures: 0, charsSaved: 0, charsNormalEdit: 0, charsSmartEdit: 0 });
 
 export function defaultMetricsPath(): string {
-  return process.env.PI_SMART_EDIT_METRICS_PATH || path.join(os.homedir(), ".pi", "agent", "pi-smart-edit", "metrics.json");
+  return process.env.PI_LEAN_EDIT_METRICS_PATH || path.join(os.homedir(), ".pi", "agent", "pi-lean-edit", "metrics.json");
 }
 
 function clone(counters: SmartEditCounters): SmartEditCounters {
