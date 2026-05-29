@@ -6,7 +6,7 @@ import path from "node:path";
 import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, successDelta } from "../src/metrics.ts";
 
 test("failure metrics increment", async () => {
-  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-edit-metrics-")), "metrics.json");
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const store = new SmartEditMetricsStore(metricsPath);
   await store.loadGlobal();
   const snapshot = await store.record(failureDelta());
@@ -16,7 +16,7 @@ test("failure metrics increment", async () => {
 });
 
 test("saved-character metrics increment on success", async () => {
-  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-edit-metrics-")), "metrics.json");
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const store = new SmartEditMetricsStore(metricsPath);
   await store.loadGlobal();
   const snapshot = await store.record(successDelta("old text", "new", 10, 12));
@@ -40,7 +40,7 @@ test("stats output table shows saved rate", () => {
 });
 
 test("global metrics persist across extension reload", async () => {
-  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-edit-metrics-")), "metrics.json");
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const first = new SmartEditMetricsStore(metricsPath);
   await first.loadGlobal();
   await first.record(successDelta("abcdef", "x", 1, 1));
@@ -53,7 +53,7 @@ test("global metrics persist across extension reload", async () => {
 });
 
 test("session metrics rebuild from tool result details", async () => {
-  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-edit-metrics-")), "metrics.json");
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const store = new SmartEditMetricsStore(metricsPath);
   store.rebuildSession([{ type: "message", message: { role: "toolResult", toolName: "edit", details: { smartEditMetrics: { delta: failureDelta() } } } }]);
   assert.equal(store.snapshot().session.attempts, 1);

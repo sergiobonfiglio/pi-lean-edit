@@ -1,13 +1,13 @@
 {
-  "name": "pi-smart-edit",
-  "version": "0.1.5",
+  "name": "pi-lean-edit",
+  "version": "0.2.0",
   "description": "Safer, cheaper edits by verifying prior reads in the harness instead of the prompt. Lets the harness verify the model already read the latest text it wants to edit, avoiding old-text replay and hash-decorated reads.",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi",
     "extension",
-    "smart-edit"
+    "lean-edit"
   ],
   "exports": "./index.ts",
   "files": [
@@ -17,11 +17,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sergiobonfiglio/pi-smart-edit.git"
+    "url": "git+https://github.com/sergiobonfiglio/pi-lean-edit.git"
   },
-  "homepage": "https://github.com/sergiobonfiglio/pi-smart-edit#readme",
+  "homepage": "https://github.com/sergiobonfiglio/pi-lean-edit#readme",
   "bugs": {
-    "url": "https://github.com/sergiobonfiglio/pi-smart-edit/issues"
+    "url": "https://github.com/sergiobonfiglio/pi-lean-edit/issues"
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",

@@ -1,27 +1,28 @@
-# pi-smart-edit
+# pi-lean-edit
 
 Safer, cheaper edits by verifying prior reads in the harness instead of the prompt.
 
-`pi-smart-edit` lets the harness verify the model already read the latest text it wants to edit, reducing stale-edit failures without resending old text in edit requests and without the per-read overhead of hash-decorated output.
+> Formerly `pi-smart-edit`.
 
+`pi-lean-edit` lets the harness verify the model already read the latest text it wants to edit, reducing stale-edit failures without resending old text in edit requests and without the per-read overhead of hash-decorated output.
 ## Install or test
 
 Install permanently:
 
 ```bash
-pi install npm:pi-smart-edit
+pi install npm:pi-lean-edit
 ```
 
 Test without installing permanently:
 
 ```bash
-pi --no-extensions -e npm:pi-smart-edit
+pi --no-extensions -e npm:pi-lean-edit
 ```
 
 To load it alongside your normal setup:
 
 ```bash
-pi -e npm:pi-smart-edit
+pi -e npm:pi-lean-edit
 ```
 
 ## Tools
@@ -46,12 +47,12 @@ Shows numbered text lines and stores shown ranges as in-memory snapshots for tha
 
 ## Metrics
 
-Successful edits record saved characters versus exact-text edit payloads. Failed edits increment failure rate. Global metrics persist at `~/.pi/agent/pi-smart-edit/metrics.json` by default, or `PI_SMART_EDIT_METRICS_PATH` if set.
+Successful edits record saved characters versus exact-text edit payloads. Failed edits increment failure rate. Global metrics persist at `~/.pi/agent/pi-lean-edit/metrics.json` by default, or `PI_LEAN_EDIT_METRICS_PATH` if set.
 
 Show stats:
 
 ```text
-/smart-edit-stats
+/lean-edit-stats
 ```
 
 ## Test
@@ -63,4 +64,4 @@ npm test
 
 ## Notes
 
-`read` output is capped by line and byte limits. Defaults: `PI_SMART_EDIT_MAX_READ_LINES=2000`, `PI_SMART_EDIT_MAX_READ_BYTES=50000`.
+`read` output is capped by line and byte limits. Defaults: `PI_LEAN_EDIT_MAX_READ_LINES=2000`, `PI_LEAN_EDIT_MAX_READ_BYTES=50000`.

@@ -8,7 +8,7 @@ import { smartRead } from "../src/read-tool.ts";
 import { SnapshotStore } from "../src/snapshot-store.ts";
 
 async function tempFile(content: string): Promise<{ dir: string; file: string }> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-edit-"));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-"));
   const file = path.join(dir, "file.txt");
   await fs.writeFile(file, content, "utf8");
   return { dir, file: await fs.realpath(file) };
