@@ -61,7 +61,14 @@ Show stats:
 npm test
 ```
 
+## Configuration
 
-## Notes
+Run `/lean-edit-settings` to configure both collapsed and expanded rendering for `read`, `edit`, and `write`. `ctrl+o` switches between those two configured views. Each setting accepts:
+
+- `minimal`: compact rendering
+- `medium`: detailed rendering capped at 20 rendered lines
+- `full`: fully detailed rendering
+
+Collapsed defaults are all `minimal`. Expanded defaults are `read=minimal`, `edit=full`, and `write=medium`. Settings persist globally in `~/.pi/agent/pi-lean-edit/settings.json`.
 
 `read` output is capped by line and byte limits. Defaults: `PI_LEAN_EDIT_MAX_READ_LINES=2000`, `PI_LEAN_EDIT_MAX_READ_BYTES=50000`.
