@@ -1,10 +1,13 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Text, getCapabilities, getImageDimensions, imageFallback } from "@earendil-works/pi-tui";
+import { promises as fs } from "node:fs";
+import { dirname, join } from "node:path";
+import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
 import { smartRead, smartReadSchema, type SmartReadResult } from "./read-tool.ts";
 import { smartEdit, smartEditSchema } from "./edit-tool.ts";
 import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
 import { renderDiffForSmartEdit } from "./diff-render.ts";
+import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./render-expansion.ts";
 
 function mergeMetricsDetails(details: Record<string, any>, delta: SmartEditDelta, snapshot: SmartEditMetricsSnapshot): Record<string, any> {
   return { ...details, smartEditMetrics: { delta, snapshot } };
@@ -189,9 +192,34 @@ export default function (pi: ExtensionAPI) {
     maxBytes: Number(process.env.PI_LEAN_EDIT_MAX_READ_BYTES ?? 50_000),
     maxColumns: Number(process.env.PI_LEAN_EDIT_MAX_READ_COLUMNS ?? 400)
   };
+  const expansionTools = ["read", "edit", "write"] as const;
+  const renderModes = ["collapsed", "expanded"] as const;
+  type ExpansionTool = typeof expansionTools[number];
+  type RenderMode = typeof renderModes[number];
+  const renderingSettings: Record<RenderMode, Record<ExpansionTool, ExpansionLevel>> = {
+    collapsed: { read: "minimal", edit: "minimal", write: "minimal" },
+    expanded: { read: "minimal", edit: "full", write: "medium" }
+  };
+  const expansionSettingsPath = join(getAgentDir(), "pi-lean-edit", "settings.json");
+  const loadExpansionSettings = async () => {
+    try {
+      const saved = JSON.parse(await fs.readFile(expansionSettingsPath, "utf8")) as Partial<Record<RenderMode, Record<string, unknown>>>;
+      for (const mode of renderModes) {
+        for (const tool of expansionTools) renderingSettings[mode][tool] = asExpansionLevel(saved?.[mode]?.[tool], renderingSettings[mode][tool]);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  };
+  const saveExpansionSettings = async () => {
+    await fs.mkdir(dirname(expansionSettingsPath), { recursive: true });
+    await fs.writeFile(expansionSettingsPath, `${JSON.stringify(renderingSettings, null, 2)}\n`, "utf8");
+  };
+  const renderLevel = (tool: ExpansionTool, expanded: boolean) => renderingSettings[expanded ? "expanded" : "collapsed"][tool];
+  const writeTool = createWriteToolDefinition(process.cwd());
   const metrics = new SmartEditMetricsStore();
 
-  pi.registerTool({
+  pi.registerTool<typeof smartReadSchema, SmartReadResult["details"], SmartReadRenderState>({
     name: "read",
     label: "read",
     description: "Read text file contents with line numbers or line-column windows for huge lines. Supports jpg, png, gif, and webp images as attachments.",
@@ -210,11 +238,17 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }], isError: true, details: {} };
       }
     },
-    renderCall: renderSmartReadCall,
-    renderResult: renderSmartReadResult
+    renderCall(args, theme, context) {
+      return renderWithExpansion(renderLevel("read", context.expanded), context, (adjusted) => renderSmartReadCall(args, theme, adjusted));
+    },
+    renderResult(result, options, theme, context) {
+      return renderWithExpansion(renderLevel("read", options.expanded), context, (adjusted) =>
+        renderSmartReadResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+      );
+    }
   });
 
-  pi.registerTool({
+  pi.registerTool<typeof smartEditSchema, { diff?: string; firstChangedLine?: number }, SmartEditRenderState>({
     name: "edit",
     label: "edit",
     description: "Edit text file by one or more 1-based inclusive line ranges or single-line column ranges.",
@@ -247,8 +281,80 @@ export default function (pi: ExtensionAPI) {
         };
       }
     },
-    renderCall: renderSmartEditCall,
-    renderResult: renderSmartEditResult
+    renderCall(args, theme, context) {
+      return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderSmartEditCall(args, theme, adjusted));
+    },
+    renderResult(result, options, theme, context) {
+      return renderWithExpansion(renderLevel("edit", options.expanded), context, (adjusted) =>
+        renderSmartEditResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+      );
+    }
+  });
+
+  pi.registerTool<typeof writeTool.parameters, undefined>({
+    ...writeTool,
+    async execute(id, params, signal, onUpdate, ctx) {
+      return createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
+    },
+    renderCall(args, theme, context) {
+      return renderWithExpansion(renderLevel("write", context.expanded), context, (adjusted) =>
+        writeTool.renderCall!(args, theme, adjusted)
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderWithExpansion(renderLevel("write", options.expanded), context, (adjusted) =>
+        writeTool.renderResult!(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+      );
+    }
+  });
+
+  pi.registerCommand("lean-edit-settings", {
+    description: "Configure collapsed and expanded rendering for read, edit, and write.",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/lean-edit-settings is available in interactive mode.", "warning");
+        return;
+      }
+
+      const settingsEntries = renderModes.flatMap((mode) => expansionTools.map((tool) => ({ mode, tool, id: `${mode}.${tool}` })));
+      const items: SettingItem[] = settingsEntries.map(({ mode, tool, id }) => ({
+        id,
+        label: `${tool} ${mode}`,
+        currentValue: renderingSettings[mode][tool],
+        values: ["minimal", "medium", "full"]
+      }));
+      await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+        const container = new Container();
+        container.addChild(new Text(theme.fg("accent", theme.bold("Lean edit rendering")), 1, 1));
+        const settingsList = new SettingsList(
+          items,
+          items.length + 2,
+          getSettingsListTheme(),
+          (id, value) => {
+            const setting = settingsEntries.find((candidate) => candidate.id === id);
+            if (setting) renderingSettings[setting.mode][setting.tool] = asExpansionLevel(value, renderingSettings[setting.mode][setting.tool]);
+          },
+          () => done(undefined)
+        );
+        container.addChild(settingsList);
+        return {
+          render: (width) => container.render(width),
+          invalidate: () => container.invalidate(),
+          handleInput: (data) => {
+            settingsList.handleInput?.(data);
+            tui.requestRender();
+          }
+        };
+      });
+
+      try {
+        await saveExpansionSettings();
+        ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+        ctx.ui.notify("Lean edit rendering settings saved.", "info");
+      } catch (error) {
+        ctx.ui.notify(`Could not save lean edit settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    }
   });
 
   pi.registerCommand("lean-edit-stats", {
@@ -260,6 +366,11 @@ export default function (pi: ExtensionAPI) {
 
 
   pi.on("session_start", async (_event, ctx) => {
+    try {
+      await loadExpansionSettings();
+    } catch (error) {
+      ctx.ui.notify(`Could not load lean edit settings: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
     await metrics.loadGlobal();
     metrics.rebuildSession(ctx.sessionManager.getBranch());
   });
