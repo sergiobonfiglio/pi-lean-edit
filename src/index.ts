@@ -222,11 +222,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof smartReadSchema, SmartReadResult["details"], SmartReadRenderState>({
     name: "read",
     label: "read",
-    description: "Read text file contents with line numbers or line-column windows for huge lines. Supports jpg, png, gif, and webp images as attachments.",
-    promptSnippet: "Read file contents with line numbers or supported images.",
+    description: "Read text file contents with line numbers or a single-line column window for huge lines. Required: path. Optional: offset and limit for line ranges; columnOffset and columnLimit only for huge-line windows. Supports jpg, png, gif, and webp images as attachments.",
+    promptSnippet: "Read file contents; path is required and all range arguments are optional.",
     promptGuidelines: [
+      "read: path is the only required argument. For normal reads, omit columnOffset and columnLimit.",
       "read: use offset/limit to inspect exact lines you may edit.",
-      "read: use columnOffset for huge single lines; continuation stays on same line until done."
+      "read: use columnOffset with columnLimit only for a huge single line; omit limit or set limit=1."
     ],
     parameters: smartReadSchema,
     renderShell: "default",
@@ -377,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; use offset/limit and columnOffset/columnLimit as needed. Same-line-count edits keep unaffected later snapshots; stale/range-miss means read again. newText: \"\" deletes."
+      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Same-line-count edits keep unaffected later snapshots; stale/range-miss means read again. newText: \"\" deletes."
     };
   });
 }

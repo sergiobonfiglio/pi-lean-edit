@@ -33,7 +33,7 @@ pi -e npm:pi-lean-edit
 { path: string; offset?: number; limit?: number; columnOffset?: number; columnLimit?: number }
 ```
 
-Shows numbered text lines and stores shown ranges as in-memory snapshots for that file. Adjacent line reads merge into wider covered ranges. Huge single-line reads can continue with `columnOffset`/`columnLimit`; `columnOffset` is single-line only, so omit `limit` or set `limit=1`. Adjacent/overlapping huge-line column windows compose into wider column coverage.
+Only `path` is required. For normal reads, use `path` alone or `offset`/`limit` for a line range. Use `columnOffset` with `columnLimit` only for a huge single-line window; omit `limit` or set `limit=1`. Shows numbered text lines and stores shown ranges as in-memory snapshots for that file. Adjacent line reads merge into wider covered ranges. Adjacent/overlapping huge-line column windows compose into wider column coverage.
 
 ### `edit`
 
