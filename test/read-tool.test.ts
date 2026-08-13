@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { smartRead } from "../src/read-tool.ts";
+import { smartRead, smartReadSchema } from "../src/read-tool.ts";
 
 async function tempFile(name: string, content: Buffer): Promise<{ dir: string; file: string }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-smart-read-"));
@@ -12,6 +12,16 @@ async function tempFile(name: string, content: Buffer): Promise<{ dir: string; f
   return { dir, file: await fs.realpath(file) };
 }
 
+test("read schema requires only path and labels all range fields optional", () => {
+  const schema = smartReadSchema as unknown as {
+    required: string[];
+    properties: Record<string, { description: string }>;
+  };
+  assert.deepEqual(schema.required, ["path"]);
+  for (const field of ["offset", "limit", "columnOffset", "columnLimit"]) {
+    assert.match(schema.properties[field]!.description, /^Optional\./);
+  }
+});
 test("supported images are returned as image attachments", async () => {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+y3ioAAAAASUVORK5CYII=", "base64");
   const { dir, file } = await tempFile("tiny.png", png);

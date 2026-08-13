@@ -5,11 +5,11 @@ import { codePointLength, formatColumnLine, formatNumberedLines, isBinary, resol
 import { type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 
 export const smartReadSchema = Type.Object({
-  path: Type.String({ description: "Path to file to read (relative or absolute)" }),
-  offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
-  columnOffset: Type.Optional(Type.Integer({ minimum: 1, description: "Column number to start reading from within offset line (1-indexed)" })),
-  columnLimit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of columns to read from offset line" }))
+  path: Type.String({ description: "Required. Path to the file to read (relative or absolute)." }),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed line at which to start reading." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum number of lines to read." })),
+  columnOffset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed column at which to start a single-line window; use only for huge lines." })),
+  columnLimit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum columns in a single-line window. Use only with columnOffset." }))
 });
 export type SmartReadInput = Static<typeof smartReadSchema>;
 
