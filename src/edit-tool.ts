@@ -9,7 +9,7 @@ import { type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts
 const smartEditRangeSchema = Type.Object({
   startLine: Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" }),
   endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine" })),
-  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Single-line only." })),
+  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Range must stay within one source line." })),
   endColumn: Type.Optional(Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive). Required with startColumn." })),
   newText: Type.String({ description: "Replacement text. Empty string deletes range." })
 });
@@ -18,7 +18,7 @@ export const smartEditSchema = Type.Object({
   path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
   startLine: Type.Optional(Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" })),
   endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine" })),
-  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Single-line only." })),
+  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Range must stay within one source line." })),
   endColumn: Type.Optional(Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive). Required with startColumn." })),
   newText: Type.Optional(Type.String({ description: "Replacement text. Empty string deletes range." })),
   edits: Type.Optional(Type.Array(smartEditRangeSchema, { minItems: 1, description: "One or more non-overlapping edits for this file." }))
@@ -54,8 +54,8 @@ export type SmartEditConfig = {
 export class StaleEditError extends Error {
   readonly refreshedText: string;
 
-  constructor(refreshedText: string) {
-    super("file stale; edit not applied. Snapshot refreshed.");
+  constructor(refreshedText: string, reason: string) {
+    super(`edit not applied: ${reason}.`);
     this.name = "StaleEditError";
     this.refreshedText = refreshedText;
   }
@@ -76,7 +76,6 @@ function validateColumns(edit: NormalizedEdit): void {
   if (!Number.isInteger(edit.startColumn) || !Number.isInteger(edit.endColumn)) throw new Error("startColumn/endColumn must be integers");
   if (edit.startColumn! < 1 || edit.endColumn! < 1) throw new Error("startColumn/endColumn must be >= 1");
   if (edit.endColumn! < edit.startColumn!) throw new Error("endColumn must be >= startColumn");
-  if (edit.newText.includes("\n") || edit.newText.includes("\r")) throw new Error("column edits require single-line newText");
 }
 
 function normalizeEdits(input: SmartEditInput): NormalizedEdit[] {
@@ -141,13 +140,6 @@ function lookupCoverage(store: SnapshotStore, full: string, edit: NormalizedEdit
   return { kind: "column", snapshot: columnSnapshot };
 }
 
-function staleMessage(store: SnapshotStore, full: string): string {
-  const ranges = store.ranges(full).map((range) => `${range.startLine}-${range.endLine}`);
-  const columns = store.columnRanges(full).map((range) => `${range.line}:${range.startColumn}-${range.endColumn}`);
-  const known = [...ranges, ...columns];
-  if (known.length === 0) return "file stale, read again: no snapshot for file";
-  return `file stale, read again: known ranges ${known.join(", ")}`;
-}
 
 function coverageMatches(edit: NormalizedEdit, coverage: SnapshotCoverage, realLine: string): boolean {
   if (coverage.kind === "full-line") return snapshotMatches(coverage.lines, [realLine]);
@@ -156,12 +148,12 @@ function coverageMatches(edit: NormalizedEdit, coverage: SnapshotCoverage, realL
   return expected === actual;
 }
 
-function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: SnapshotCoverage[], parsed: SplitText, config: SmartEditConfig): string | undefined {
+function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: Array<SnapshotCoverage | undefined>, parsed: SplitText, config: SmartEditConfig): string | undefined {
   const refreshed = new Map<string, { text: string; store: () => void }>();
 
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i]!;
-    const coverage = coverages[i]!;
+    const coverage = coverages[i];
     if (edit.startColumn == null || edit.endColumn == null) {
       const lines = sliceRange(parsed.lines, edit.startLine, edit.endLine);
       refreshed.set(`lines:${edit.startLine}-${edit.endLine}`, {
@@ -172,7 +164,7 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
     }
 
     const line = parsed.lines[edit.startLine - 1]!;
-    if (coverage.kind === "full-line") {
+    if (coverage?.kind === "full-line") {
       refreshed.set(`line:${edit.startLine}`, {
         text: formatNumberedLines([line], edit.startLine),
         store: () => store.set({ path, readAt: Date.now(), startLine: edit.startLine, endLine: edit.startLine, lines: [line], lineEnding: parsed.lineEnding })
@@ -207,7 +199,7 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
 }
 
 function keepsSameLineCount(edit: NormalizedEdit): boolean {
-  if (edit.startColumn != null && edit.endColumn != null) return true;
+  if (edit.startColumn != null && edit.endColumn != null) return !/[\r\n]/.test(edit.newText);
   return replacementLines(edit.newText).length === (edit.endLine - edit.startLine + 1);
 }
 
@@ -234,11 +226,7 @@ export async function smartEdit(
   const edits = normalizeEdits(input);
   const full = await resolveCanonicalPath(cwd, input.path);
   if (store.revision(full) > invocationRevision) throw new Error("file stale, read again: snapshot changed while edit was starting");
-  const initialCoverages = edits.map((edit) => {
-    const coverage = lookupCoverage(store, full, edit);
-    if (!coverage) throw new Error(staleMessage(store, full));
-    return coverage;
-  });
+  const initialCoverages = edits.map((edit) => lookupCoverage(store, full, edit));
   const initialRevision = store.revision(full);
 
   return withFileMutationQueue(full, async () => {
@@ -246,29 +234,37 @@ export async function smartEdit(
     const before = await fs.readFile(full, "utf8");
     const parsed = splitText(before);
     const parts: Array<{ oldText: string; edit: NormalizedEdit }> = [];
-    let stale = false;
+    let missingCoverage = false;
+    let changedCoverage = false;
 
     for (let i = 0; i < edits.length; i++) {
       const edit = edits[i]!;
       if (edit.endLine > parsed.lines.length) throw new Error("file stale, read again: requested range is beyond end of file");
-      const coverage = initialCoverages[i]!;
+      const coverage = initialCoverages[i];
 
       if (edit.startColumn != null && edit.endColumn != null) {
         const line = parsed.lines[edit.startLine - 1]!;
         if (edit.endColumn > codePointLength(line)) throw new Error("file stale, read again: requested columns are beyond end of line");
-        if (!coverageMatches(edit, coverage, line)) stale = true;
+        if (!coverage) missingCoverage = true;
+        else if (!coverageMatches(edit, coverage, line)) changedCoverage = true;
         parts.push({ oldText: sliceColumns(line, edit.startColumn, edit.endColumn), edit });
       } else {
         const actual = sliceRange(parsed.lines, edit.startLine, edit.endLine);
-        if (coverage.kind !== "full-line" || !snapshotMatches(coverage.lines, actual)) stale = true;
+        if (!coverage) missingCoverage = true;
+        else if (coverage.kind !== "full-line" || !snapshotMatches(coverage.lines, actual)) changedCoverage = true;
         parts.push({ oldText: rangeText(parsed.lines, edit.startLine, edit.endLine, parsed.lineEnding), edit });
       }
     }
 
-    if (stale) {
+    if (missingCoverage || changedCoverage) {
       const refreshedText = refreshStaleRanges(store, full, edits, initialCoverages, parsed, config);
       if (refreshedText == null) throw new Error("file stale, read again: updated range exceeds automatic refresh limits");
-      throw new StaleEditError(refreshedText);
+      const reason = missingCoverage && changedCoverage
+        ? "one or more requested ranges were not read beforehand, and other requested text changed since it was read"
+        : missingCoverage
+          ? "one or more requested ranges were not read beforehand"
+          : "the requested text changed since it was read";
+      throw new StaleEditError(refreshedText, reason);
     }
 
     const nextLines = [...parsed.lines];
@@ -284,7 +280,10 @@ export async function smartEdit(
     for (const [lineNumber, lineEdits] of columnEditsByLine) {
       lineEdits.sort((a, b) => b.startColumn! - a.startColumn!);
       let line = nextLines[lineNumber - 1]!;
-      for (const edit of lineEdits) line = replaceColumns(line, edit.startColumn!, edit.endColumn!, edit.newText);
+      for (const edit of lineEdits) {
+        const newText = edit.newText.replace(/\r\n|\r|\n/g, parsed.lineEnding);
+        line = replaceColumns(line, edit.startColumn!, edit.endColumn!, newText);
+      }
       nextLines[lineNumber - 1] = line;
     }
 

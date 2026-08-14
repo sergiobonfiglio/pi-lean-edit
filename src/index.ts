@@ -252,13 +252,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof smartEditSchema, { diff?: string; firstChangedLine?: number }, SmartEditRenderState>({
     name: "edit",
     label: "edit",
-    description: "Edit text file by one or more 1-based inclusive line ranges or single-line column ranges.",
+    description: "Edit text file by one or more 1-based inclusive line ranges or column ranges within one source line.",
     promptSnippet: "Edit lines or columns: { path, startLine, endLine?, startColumn?, endColumn?, newText } or { path, edits: [...] }.",
     promptGuidelines: [
-      "edit: use after read for same file/ranges; a stale mismatch refreshes the requested snapshot, so retry using the returned text; range misses require read.",
-      "edit: after success, edited ranges are invalidated; same-line-count edits keep unaffected later snapshots.",
+      "edit: use after read for same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace.",
+      "edit: after success, edited ranges require another read or failed edit before reuse; line-count-preserving edits keep unaffected later reads valid.",
       "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes.",
-      "edit: column edits stay within one line; huge-line column edits require matching column snapshot."
+      "edit: column ranges stay within one source line and may insert newlines; huge-line column edits require a matching column read."
     ],
     parameters: smartEditSchema,
     renderShell: "default",
@@ -275,7 +275,7 @@ export default function (pi: ExtensionAPI) {
         const delta = failureDelta();
         const snapshot = await metrics.record(delta);
         const msg = e instanceof StaleEditError
-          ? `${e.message}\n${e.refreshedText}\nRetry the edit using the updated text above.`
+          ? `${e.message}\nCurrent text:\n${e.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
           : e instanceof Error ? e.message : String(e);
         return {
           content: [{ type: "text", text: `${msg}\n${statsLine(snapshot)}` }],
@@ -380,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Same-line-count edits keep unaffected later snapshots; on a stale mismatch, retry using the refreshed text returned by edit; range misses require read. newText: \"\" deletes."
+      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Line-count-preserving edits keep unaffected later reads valid. If requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace. newText: \"\" deletes."
     };
   });
 }
