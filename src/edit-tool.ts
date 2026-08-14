@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { Type, type Static } from "typebox";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { firstChangedLine, unifiedDiff } from "./diff.ts";
-import { codePointLength, joinText, rangeText, replaceColumns, replacementLines, resolveCanonicalPath, sliceColumns, sliceRange, splitText } from "./line-utils.ts";
+import { codePointLength, formatColumnLine, formatNumberedLines, joinText, rangeText, replaceColumns, replacementLines, resolveCanonicalPath, sliceColumns, sliceRange, splitText, type SplitText } from "./line-utils.ts";
 import { type ColumnSnapshot, type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 import { type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
 
@@ -44,6 +44,22 @@ export type SmartEditResult = {
   delta: SmartEditDelta;
   metrics?: SmartEditMetricsSnapshot;
 };
+
+export type SmartEditConfig = {
+  maxLines: number;
+  maxBytes: number;
+  maxColumns?: number;
+};
+
+export class StaleEditError extends Error {
+  readonly refreshedText: string;
+
+  constructor(refreshedText: string) {
+    super("file stale; edit not applied. Snapshot refreshed.");
+    this.name = "StaleEditError";
+    this.refreshedText = refreshedText;
+  }
+}
 
 function validateRange(startLine: number, endLine: number): void {
   if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) throw new Error("startLine/endLine must be integers");
@@ -91,11 +107,8 @@ function normalizeEdits(input: SmartEditInput): NormalizedEdit[] {
   return edits;
 }
 
-function assertSnapshotMatches(snapshotLines: string[], realLines: string[]): void {
-  if (snapshotLines.length !== realLines.length) throw new Error("file stale, read again");
-  for (let i = 0; i < snapshotLines.length; i++) {
-    if (snapshotLines[i] !== realLines[i]) throw new Error("file stale, read again");
-  }
+function snapshotMatches(snapshotLines: string[], realLines: string[]): boolean {
+  return snapshotLines.length === realLines.length && snapshotLines.every((line, i) => line === realLines[i]);
 }
 
 function rangeLabel(edit: NormalizedEdit): string {
@@ -136,14 +149,61 @@ function staleMessage(store: SnapshotStore, full: string): string {
   return `file stale, read again: known ranges ${known.join(", ")}`;
 }
 
-function verifyCoverage(edit: NormalizedEdit, coverage: SnapshotCoverage, realLine: string): void {
-  if (coverage.kind === "full-line") {
-    assertSnapshotMatches(coverage.lines, [realLine]);
-    return;
-  }
+function coverageMatches(edit: NormalizedEdit, coverage: SnapshotCoverage, realLine: string): boolean {
+  if (coverage.kind === "full-line") return snapshotMatches(coverage.lines, [realLine]);
   const expected = sliceColumns(coverage.snapshot.text, edit.startColumn! - coverage.snapshot.startColumn + 1, edit.endColumn! - coverage.snapshot.startColumn + 1);
   const actual = sliceColumns(realLine, edit.startColumn!, edit.endColumn!);
-  if (expected !== actual) throw new Error("file stale, read again");
+  return expected === actual;
+}
+
+function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: SnapshotCoverage[], parsed: SplitText, config: SmartEditConfig): string | undefined {
+  const refreshed = new Map<string, { text: string; store: () => void }>();
+
+  for (let i = 0; i < edits.length; i++) {
+    const edit = edits[i]!;
+    const coverage = coverages[i]!;
+    if (edit.startColumn == null || edit.endColumn == null) {
+      const lines = sliceRange(parsed.lines, edit.startLine, edit.endLine);
+      refreshed.set(`lines:${edit.startLine}-${edit.endLine}`, {
+        text: formatNumberedLines(lines, edit.startLine),
+        store: () => store.set({ path, readAt: Date.now(), startLine: edit.startLine, endLine: edit.endLine, lines, lineEnding: parsed.lineEnding })
+      });
+      continue;
+    }
+
+    const line = parsed.lines[edit.startLine - 1]!;
+    if (coverage.kind === "full-line") {
+      refreshed.set(`line:${edit.startLine}`, {
+        text: formatNumberedLines([line], edit.startLine),
+        store: () => store.set({ path, readAt: Date.now(), startLine: edit.startLine, endLine: edit.startLine, lines: [line], lineEnding: parsed.lineEnding })
+      });
+      continue;
+    }
+
+    if (edit.endColumn - edit.startColumn + 1 > (config.maxColumns ?? 400)) return undefined;
+    const text = sliceColumns(line, edit.startColumn, edit.endColumn);
+    refreshed.set(`columns:${edit.startLine}:${edit.startColumn}-${edit.endColumn}`, {
+      text: formatColumnLine(edit.startLine, edit.startColumn, edit.endColumn, text),
+      store: () => store.setColumns({
+        path,
+        readAt: Date.now(),
+        line: edit.startLine,
+        startColumn: edit.startColumn!,
+        endColumn: edit.endColumn!,
+        text,
+        lineLength: codePointLength(line),
+        lineEnding: parsed.lineEnding,
+        hugeLine: true
+      })
+    });
+  }
+
+  const entries = [...refreshed.values()];
+  const text = entries.map((entry) => entry.text).join("\n");
+  const outputLines = text ? text.split("\n").length : 0;
+  if (outputLines > config.maxLines || Buffer.byteLength(text, "utf8") > config.maxBytes) return undefined;
+  for (const entry of entries) entry.store();
+  return text;
 }
 
 function keepsSameLineCount(edit: NormalizedEdit): boolean {
@@ -164,36 +224,51 @@ function invalidateSnapshotsAfterEdit(store: SnapshotStore, path: string, edits:
   if (preservedPrefixEdits.length) store.invalidateRanges(path, preservedPrefixEdits);
 }
 
-export async function smartEdit(cwd: string, input: SmartEditInput, store: SnapshotStore = snapshotStore): Promise<SmartEditResult> {
+export async function smartEdit(
+  cwd: string,
+  input: SmartEditInput,
+  store: SnapshotStore = snapshotStore,
+  config: SmartEditConfig = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 }
+): Promise<SmartEditResult> {
+  const invocationRevision = store.revision();
   const edits = normalizeEdits(input);
   const full = await resolveCanonicalPath(cwd, input.path);
-  for (const edit of edits) {
-    if (!lookupCoverage(store, full, edit)) throw new Error(staleMessage(store, full));
-  }
+  if (store.revision(full) > invocationRevision) throw new Error("file stale, read again: snapshot changed while edit was starting");
+  const initialCoverages = edits.map((edit) => {
+    const coverage = lookupCoverage(store, full, edit);
+    if (!coverage) throw new Error(staleMessage(store, full));
+    return coverage;
+  });
+  const initialRevision = store.revision(full);
 
   return withFileMutationQueue(full, async () => {
+    if (store.revision(full) !== initialRevision) throw new Error("file stale, read again: snapshot changed while edit was queued");
     const before = await fs.readFile(full, "utf8");
     const parsed = splitText(before);
     const parts: Array<{ oldText: string; edit: NormalizedEdit }> = [];
+    let stale = false;
 
-    for (const edit of edits) {
-      if (edit.endLine > parsed.lines.length) throw new Error("file stale, read again");
+    for (let i = 0; i < edits.length; i++) {
+      const edit = edits[i]!;
+      if (edit.endLine > parsed.lines.length) throw new Error("file stale, read again: requested range is beyond end of file");
+      const coverage = initialCoverages[i]!;
+
       if (edit.startColumn != null && edit.endColumn != null) {
         const line = parsed.lines[edit.startLine - 1]!;
-        if (edit.endColumn > codePointLength(line)) throw new Error("file stale, read again");
-        const coverage = lookupCoverage(store, full, edit);
-        if (!coverage) throw new Error("file stale, read again");
-        verifyCoverage(edit, coverage, line);
+        if (edit.endColumn > codePointLength(line)) throw new Error("file stale, read again: requested columns are beyond end of line");
+        if (!coverageMatches(edit, coverage, line)) stale = true;
         parts.push({ oldText: sliceColumns(line, edit.startColumn, edit.endColumn), edit });
       } else {
-        const snapshot = store.covered(full, edit.startLine, edit.endLine);
-        if (!snapshot) throw new Error("file stale, read again");
-        const snapshotOffset = edit.startLine - snapshot.startLine;
-        const expected = snapshot.lines.slice(snapshotOffset, snapshotOffset + (edit.endLine - edit.startLine + 1));
         const actual = sliceRange(parsed.lines, edit.startLine, edit.endLine);
-        assertSnapshotMatches(expected, actual);
+        if (coverage.kind !== "full-line" || !snapshotMatches(coverage.lines, actual)) stale = true;
         parts.push({ oldText: rangeText(parsed.lines, edit.startLine, edit.endLine, parsed.lineEnding), edit });
       }
+    }
+
+    if (stale) {
+      const refreshedText = refreshStaleRanges(store, full, edits, initialCoverages, parsed, config);
+      if (refreshedText == null) throw new Error("file stale, read again: updated range exceeds automatic refresh limits");
+      throw new StaleEditError(refreshedText);
     }
 
     const nextLines = [...parsed.lines];

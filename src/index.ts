@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
 import { smartRead, smartReadSchema, type SmartReadResult } from "./read-tool.ts";
-import { smartEdit, smartEditSchema } from "./edit-tool.ts";
+import { smartEdit, smartEditSchema, StaleEditError } from "./edit-tool.ts";
 import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
 import { renderDiffForSmartEdit } from "./diff-render.ts";
@@ -255,7 +255,7 @@ export default function (pi: ExtensionAPI) {
     description: "Edit text file by one or more 1-based inclusive line ranges or single-line column ranges.",
     promptSnippet: "Edit lines or columns: { path, startLine, endLine?, startColumn?, endColumn?, newText } or { path, edits: [...] }.",
     promptGuidelines: [
-      "edit: use after read for same file/ranges; if stale/range-miss, read again.",
+      "edit: use after read for same file/ranges; a stale mismatch refreshes the requested snapshot, so retry using the returned text; range misses require read.",
       "edit: after success, edited ranges are invalidated; same-line-count edits keep unaffected later snapshots.",
       "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes.",
       "edit: column edits stay within one line; huge-line column edits require matching column snapshot."
@@ -264,7 +264,7 @@ export default function (pi: ExtensionAPI) {
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        const result = await smartEdit(ctx.cwd, params);
+        const result = await smartEdit(ctx.cwd, params, undefined, config);
         const snapshot = await metrics.record(result.delta);
         const text = `${result.text}\n${statsLine(snapshot)}`;
         return {
@@ -274,7 +274,9 @@ export default function (pi: ExtensionAPI) {
       } catch (e) {
         const delta = failureDelta();
         const snapshot = await metrics.record(delta);
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = e instanceof StaleEditError
+          ? `${e.message}\n${e.refreshedText}\nRetry the edit using the updated text above.`
+          : e instanceof Error ? e.message : String(e);
         return {
           content: [{ type: "text", text: `${msg}\n${statsLine(snapshot)}` }],
           isError: true,
@@ -378,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Same-line-count edits keep unaffected later snapshots; stale/range-miss means read again. newText: \"\" deletes."
+      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Same-line-count edits keep unaffected later snapshots; on a stale mismatch, retry using the refreshed text returned by edit; range misses require read. newText: \"\" deletes."
     };
   });
 }
