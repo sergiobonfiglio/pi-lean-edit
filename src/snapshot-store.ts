@@ -27,6 +27,7 @@ type ColumnSnapshotSegment = Omit<ColumnSnapshot, "path">;
 
 type FileMemory = {
   path: string;
+  revision: number;
   segments: SnapshotSegment[];
   columnSegments: ColumnSnapshotSegment[];
 };
@@ -113,9 +114,14 @@ function mergeAdjacentColumns(segments: ColumnSnapshotSegment[]): ColumnSnapshot
 
 export class SnapshotStore {
   private files = new Map<string, FileMemory>();
+  private nextRevision = 0;
+
+  revision(path?: string): number {
+    return path == null ? this.nextRevision : this.files.get(path)?.revision ?? 0;
+  }
 
   set(snapshot: FileSnapshot): void {
-    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, segments: [], columnSegments: [] };
+    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, revision: 0, segments: [], columnSegments: [] };
     const next: SnapshotSegment[] = [];
     for (const segment of memory.segments) {
       if (segment.endLine < snapshot.startLine || segment.startLine > snapshot.endLine) {
@@ -127,11 +133,12 @@ export class SnapshotStore {
     }
     next.push({ readAt: snapshot.readAt, startLine: snapshot.startLine, endLine: snapshot.endLine, lines: [...snapshot.lines], lineEnding: snapshot.lineEnding });
     memory.segments = mergeAdjacent(next);
+    memory.revision = ++this.nextRevision;
     this.files.set(snapshot.path, memory);
   }
 
   setColumns(snapshot: ColumnSnapshot): void {
-    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, segments: [], columnSegments: [] };
+    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, revision: 0, segments: [], columnSegments: [] };
     const next: ColumnSnapshotSegment[] = [];
     for (const segment of memory.columnSegments) {
       if (segment.line !== snapshot.line || segment.endColumn < snapshot.startColumn || segment.startColumn > snapshot.endColumn) {
@@ -152,6 +159,7 @@ export class SnapshotStore {
       hugeLine: snapshot.hugeLine
     });
     memory.columnSegments = mergeAdjacentColumns(next);
+    memory.revision = ++this.nextRevision;
     this.files.set(snapshot.path, memory);
   }
 
@@ -209,6 +217,7 @@ export class SnapshotStore {
     else {
       memory.segments = mergeAdjacent(next);
       memory.columnSegments = nextColumns;
+      memory.revision = ++this.nextRevision;
     }
   }
 
@@ -226,6 +235,7 @@ export class SnapshotStore {
     else {
       memory.segments = mergeAdjacent(next);
       memory.columnSegments = nextColumns;
+      memory.revision = ++this.nextRevision;
     }
   }
 

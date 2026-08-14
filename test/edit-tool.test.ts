@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { smartEdit } from "../src/edit-tool.ts";
+import { smartEdit, StaleEditError } from "../src/edit-tool.ts";
 import { smartRead } from "../src/read-tool.ts";
 import { SnapshotStore } from "../src/snapshot-store.ts";
 
@@ -32,6 +32,17 @@ function readText(result: Awaited<ReturnType<typeof smartRead>>): string {
   return first?.type === "text" ? first.text : "";
 }
 
+async function expectStaleRefresh(run: () => Promise<unknown>): Promise<StaleEditError> {
+  let caught: unknown;
+  try {
+    await run();
+  } catch (error) {
+    caught = error;
+  }
+  assert.ok(caught instanceof StaleEditError);
+  return caught;
+}
+
 test("edit without read fails", async () => {
   const session = await createSession("a\nb\n");
   await assert.rejects(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 1, newText: "x" } }, session.store), /file stale, read again/);
@@ -43,11 +54,38 @@ test("edit range not covered by memorized reads fails", async () => {
   await assert.rejects(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 2, newText: "x" } }, session.store), /known ranges 1-1/);
 });
 
-test("file changed after read fails", async () => {
+test("file changed after read returns current text and refreshes snapshot", async () => {
   const session = await createSession("a\nb\n");
   await smartRead(session.dir, { path: session.file }, config, session.store);
   await fs.writeFile(session.file, "a\nB\n", "utf8");
-  await assert.rejects(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 2, newText: "x" } }, session.store), /file stale, read again/);
+  const error = await expectStaleRefresh(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 2, newText: "x" } }, session.store));
+  assert.equal(error.refreshedText, "2 │ B");
+  await expectFile(session, "a\nB\n");
+  await smartEdit(session.dir, { path: session.file, ...{ startLine: 2, newText: "x" } }, session.store);
+  await expectFile(session, "a\nx\n");
+});
+
+test("stale refresh does not snapshot text beyond automatic output limits", async () => {
+  const session = await createSession("before\n");
+  await smartRead(session.dir, { path: session.file }, config, session.store);
+  await fs.writeFile(session.file, "updated text\n", "utf8");
+  const input = { path: session.file, startLine: 1, newText: "after" };
+  await assert.rejects(() => smartEdit(session.dir, input, session.store, { maxLines: 1, maxBytes: 5 }), /exceeds automatic refresh limits/);
+  const error = await expectStaleRefresh(() => smartEdit(session.dir, input, session.store));
+  assert.equal(error.refreshedText, "1 │ updated text");
+});
+
+test("concurrent stale edits cannot consume each other's refreshed snapshot", async () => {
+  const session = await createSession("before\n");
+  await smartRead(session.dir, { path: session.file }, config, session.store);
+  await fs.writeFile(session.file, "external\n", "utf8");
+  const results = await Promise.allSettled([
+    smartEdit(session.dir, { path: session.file, startLine: 1, newText: "first" }, session.store),
+    smartEdit(session.dir, { path: session.file, startLine: 1, newText: "second" }, session.store)
+  ]);
+  assert.ok(results.every((result) => result.status === "rejected"));
+  assert.ok(results.some((result) => result.status === "rejected" && result.reason instanceof StaleEditError));
+  await expectFile(session, "external\n");
 });
 
 test("duplicate text edits only requested range", async () => {
@@ -147,6 +185,22 @@ test("multi-range edit can use combined read ranges", async () => {
   await expectFile(session, "1\ntwo\n3\n4\nfive\n6\n");
 });
 
+test("stale multi-range edit refreshes every requested range", async () => {
+  const session = await createSession("a\nb\nc\nd\ne\n");
+  await smartRead(session.dir, { path: session.file }, config, session.store);
+  await fs.writeFile(session.file, "a\nB\nc\nd\nE\n", "utf8");
+  const input = {
+    path: session.file,
+    edits: [
+      { startLine: 2, newText: "two" },
+      { startLine: 5, newText: "five" }
+    ]
+  };
+  const error = await expectStaleRefresh(() => smartEdit(session.dir, input, session.store));
+  assert.equal(error.refreshedText, "2 │ B\n5 │ E");
+  await smartEdit(session.dir, input, session.store);
+  await expectFile(session, "a\ntwo\nc\nd\nfive\n");
+});
 test("same-line-count multi-range edit preserves unaffected later snapshots", async () => {
   const session = await createSession("1\n2\n3\n4\n5\n6\n");
   await smartRead(session.dir, { path: session.file }, config, session.store);
@@ -308,12 +362,27 @@ test("huge line column edit fails if target span not read", async () => {
   await assert.rejects(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } }, session.store), /known ranges 1:1-4/);
 });
 
-test("huge line column edit fails if target substring changed after read", async () => {
+test("stale huge-line column edit refreshes the target window", async () => {
   const huge = "0123456789ABCDEFGHIJ";
   const session = await createSession(`${huge}\n`);
-  await smartRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 50, maxColumns: 6 }, session.store);
+  await smartRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
   await fs.writeFile(session.file, "01234ZZZ89ABCDEFGHIJ\n", "utf8");
-  await assert.rejects(() => smartEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } }, session.store), /file stale, read again/);
+  const input = { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } };
+  const error = await expectStaleRefresh(() => smartEdit(session.dir, input, session.store));
+  assert.equal(error.refreshedText, "1:6-8 │ ZZZ");
+  await smartEdit(session.dir, input, session.store);
+  await expectFile(session, "01234xyz89ABCDEFGHIJ\n");
+});
+
+test("stale huge-line refresh respects the configured column limit", async () => {
+  const session = await createSession("0123456789ABCDEFGHIJ\n");
+  await smartRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
+  await fs.writeFile(session.file, "01234ZZZ89ABCDEFGHIJ\n", "utf8");
+  const input = { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } };
+  await assert.rejects(
+    () => smartEdit(session.dir, input, session.store, { maxLines: 2000, maxBytes: 50_000, maxColumns: 2 }),
+    /exceeds automatic refresh limits/
+  );
 });
 
 test("normal line column edit succeeds after whole line read", async () => {
@@ -323,6 +392,16 @@ test("normal line column edit succeeds after whole line read", async () => {
   await expectFile(session, "aXYZef\n");
 });
 
+test("stale normal-line column edit refreshes the whole line", async () => {
+  const session = await createSession("abcdef\n");
+  await smartRead(session.dir, { path: session.file }, config, session.store);
+  await fs.writeFile(session.file, "aBCDef\n", "utf8");
+  const input = { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "XYZ" } };
+  const error = await expectStaleRefresh(() => smartEdit(session.dir, input, session.store));
+  assert.equal(error.refreshedText, "1 │ aBCDef");
+  await smartEdit(session.dir, input, session.store);
+  await expectFile(session, "aXYZef\n");
+});
 test("normal line column edit fails after same-line column-only read", async () => {
   const session = await createSession("abcdef\n");
   await smartRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 2, columnLimit: 3 }, { maxLines: 2000, maxBytes: 50, maxColumns: 3 }, session.store);
