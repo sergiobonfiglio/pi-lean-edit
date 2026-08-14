@@ -43,7 +43,7 @@ Only `path` is required. For normal reads, use `path` alone or `offset`/`limit` 
 { path: string; edits: Array<{ startLine: number; endLine?: number; startColumn?: number; endColumn?: number; newText: string }> }
 ```
 
-`edit` applies one or more non-overlapping inclusive ranges after `read` has shown those ranges for the same canonical file. If a covered range changed, the edit is not applied; instead, the error returns the current numbered text and refreshes that snapshot so the edit can be retried immediately. Missing coverage and refreshed text beyond the configured read limits still require `read`. Normal-line column edits require a whole-line snapshot; huge-line column edits can use matching column snapshots. After a successful edit, edited ranges are invalidated. Same-line-count edits preserve unaffected later snapshots; line-count-changing edits invalidate later snapshots.
+`edit` applies one or more non-overlapping inclusive ranges only when the requested text matches text previously shown by `read` or a failed edit. Column ranges must stay within one source line, but their replacement text may contain newlines. If a range was not read or its text changed, the edit is not applied; the error returns the current text so the same edit can be retried if that is still the intended target. Text beyond the configured automatic output limits still requires `read`. Normal-line column reads show the whole line; huge-line column reads can cover matching column ranges. After a successful edit, edited text must be read again before reuse. Line-count-preserving edits keep unaffected later reads valid; line-count-changing edits invalidate them.
 
 ## Metrics
 
