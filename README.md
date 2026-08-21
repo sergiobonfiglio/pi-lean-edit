@@ -45,6 +45,10 @@ Only `path` is required. For normal reads, use `path` alone or `offset`/`limit` 
 
 `edit` applies one or more non-overlapping inclusive ranges only when the requested text matches text previously shown by `read` or a failed edit. Column ranges must stay within one source line, but their replacement text may contain newlines. If a range was not read or its text changed, the edit is not applied; for line-range edits, the error returns and snapshots the current target with up to five surrounding lines on each side so the same or a nearby corrected edit can be retried. Text beyond the configured automatic output limits still requires `read`. Normal-line column reads show the whole line; huge-line column reads can cover matching column ranges. After a successful edit, edited text must be read again before reuse. Line-count-preserving edits keep unaffected later reads valid; line-count-changing edits invalidate them.
 
+## Concurrency
+
+Cooperating `pi-lean-edit` processes in one checkout serialize `edit` and `write` mutations per canonical file; different files can still proceed concurrently. Snapshots remain per process, so every subagent must perform its own `read` before `edit`. For substantial parallel work, isolated worktrees or disjoint files are still preferable. Shell commands and other tools that do not use this cooperative lock can still race with these operations.
+
 ## Metrics
 
 Successful edits record saved characters versus exact-text edit payloads. Failed edits increment failure rate. Global metrics persist at `~/.pi/agent/pi-lean-edit/metrics.json` by default, or `PI_LEAN_EDIT_METRICS_PATH` if set.
