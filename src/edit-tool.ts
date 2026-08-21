@@ -149,23 +149,40 @@ function coverageMatches(edit: NormalizedEdit, coverage: SnapshotCoverage, realL
 }
 
 function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: Array<SnapshotCoverage | undefined>, parsed: SplitText, config: SmartEditConfig): string | undefined {
-  const refreshed = new Map<string, { text: string; store: () => void }>();
+  const contextLines = 5;
+  const lineRanges: Array<{ startLine: number; endLine: number }> = [];
+  for (const edit of edits) {
+    if (edit.startColumn != null && edit.endColumn != null) continue;
+    const range = {
+      startLine: Math.max(1, edit.startLine - contextLines),
+      endLine: Math.min(parsed.lines.length, edit.endLine + contextLines)
+    };
+    const previous = lineRanges.at(-1);
+    if (previous && range.startLine <= previous.endLine + 1) previous.endLine = Math.max(previous.endLine, range.endLine);
+    else lineRanges.push(range);
+  }
+
+  const refreshed = new Map<string, { startLine: number; text: string; store: () => void }>();
+  for (const range of lineRanges) {
+    const lines = sliceRange(parsed.lines, range.startLine, range.endLine);
+    refreshed.set(`lines:${range.startLine}-${range.endLine}`, {
+      startLine: range.startLine,
+      text: formatNumberedLines(lines, range.startLine),
+      store: () => store.set({ path, readAt: Date.now(), startLine: range.startLine, endLine: range.endLine, lines, lineEnding: parsed.lineEnding })
+    });
+  }
 
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i]!;
     const coverage = coverages[i];
-    if (edit.startColumn == null || edit.endColumn == null) {
-      const lines = sliceRange(parsed.lines, edit.startLine, edit.endLine);
-      refreshed.set(`lines:${edit.startLine}-${edit.endLine}`, {
-        text: formatNumberedLines(lines, edit.startLine),
-        store: () => store.set({ path, readAt: Date.now(), startLine: edit.startLine, endLine: edit.endLine, lines, lineEnding: parsed.lineEnding })
-      });
-      continue;
-    }
+    if (edit.startColumn == null || edit.endColumn == null) continue;
 
     const line = parsed.lines[edit.startLine - 1]!;
+    const coveredByLineRefresh = lineRanges.some((range) => edit.startLine >= range.startLine && edit.startLine <= range.endLine);
     if (coverage?.kind === "full-line") {
+      if (coveredByLineRefresh) continue;
       refreshed.set(`line:${edit.startLine}`, {
+        startLine: edit.startLine,
         text: formatNumberedLines([line], edit.startLine),
         store: () => store.set({ path, readAt: Date.now(), startLine: edit.startLine, endLine: edit.startLine, lines: [line], lineEnding: parsed.lineEnding })
       });
@@ -173,8 +190,10 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
     }
 
     if (edit.endColumn - edit.startColumn + 1 > (config.maxColumns ?? 400)) return undefined;
+    if (coveredByLineRefresh) continue;
     const text = sliceColumns(line, edit.startColumn, edit.endColumn);
     refreshed.set(`columns:${edit.startLine}:${edit.startColumn}-${edit.endColumn}`, {
+      startLine: edit.startLine,
       text: formatColumnLine(edit.startLine, edit.startColumn, edit.endColumn, text),
       store: () => store.setColumns({
         path,
@@ -190,7 +209,7 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
     });
   }
 
-  const entries = [...refreshed.values()];
+  const entries = [...refreshed.values()].sort((a, b) => a.startLine - b.startLine);
   const text = entries.map((entry) => entry.text).join("\n");
   const outputLines = text ? text.split("\n").length : 0;
   if (outputLines > config.maxLines || Buffer.byteLength(text, "utf8") > config.maxBytes) return undefined;
