@@ -185,6 +185,19 @@ test("concurrent stale edits cannot consume each other's refreshed snapshot", as
   await expectFile(session, "external\n");
 });
 
+test("same-process initially valid concurrent edits do not lose updates", async () => {
+  const session = await createSession("one\ntwo\n");
+  await smartRead(session.dir, { path: session.file }, config, session.store);
+  const results = await Promise.allSettled([
+    smartEdit(session.dir, { path: session.file, startLine: 1, newText: "ONE" }, session.store),
+    smartEdit(session.dir, { path: session.file, startLine: 2, newText: "TWO" }, session.store)
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.ok(results.some((result) => result.status === "rejected" && /snapshot changed while edit was queued/.test(String(result.reason))));
+  const content = await fs.readFile(session.file, "utf8");
+  assert.ok(content === "ONE\ntwo\n" || content === "one\nTWO\n");
+});
+
 test("duplicate text edits only requested range", async () => {
   const session = await createSession("same\nkeep\nsame\n");
   await smartRead(session.dir, { path: session.file }, config, session.store);

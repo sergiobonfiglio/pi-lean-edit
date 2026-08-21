@@ -8,6 +8,8 @@ import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, type SmartEd
 import { diffStat } from "./diff.ts";
 import { renderDiffForSmartEdit } from "./diff-render.ts";
 import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./render-expansion.ts";
+import { resolveCanonicalPath } from "./line-utils.ts";
+import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 
 function mergeMetricsDetails(details: Record<string, any>, delta: SmartEditDelta, snapshot: SmartEditMetricsSnapshot): Record<string, any> {
   return { ...details, smartEditMetrics: { delta, snapshot } };
@@ -297,7 +299,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof writeTool.parameters, undefined>({
     ...writeTool,
     async execute(id, params, signal, onUpdate, ctx) {
-      return createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
+      const canonicalPath = await resolveCanonicalPath(ctx.cwd, params.path);
+      return withInterprocessFileMutationLock(canonicalPath, () => createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx));
     },
     renderCall(args, theme, context) {
       return renderWithExpansion(renderLevel("write", context.expanded), context, (adjusted) =>

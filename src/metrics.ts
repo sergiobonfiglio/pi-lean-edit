@@ -2,7 +2,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-
+import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
+import { resolveCanonicalPath } from "./line-utils.ts";
 export type SmartEditCounters = {
   attempts: number;
   failures: number;
@@ -122,7 +123,7 @@ export class SmartEditMetricsStore {
   }
 
   async loadGlobal(): Promise<void> {
-    this.globalCounters = await readCounters(this.metricsPath);
+    this.globalCounters = await readCounters(await resolveCanonicalPath(process.cwd(), this.metricsPath));
   }
 
   rebuildSession(branchEntries: any[]): void {
@@ -138,12 +139,13 @@ export class SmartEditMetricsStore {
   async record(delta: SmartEditDelta): Promise<SmartEditMetricsSnapshot> {
     add(this.sessionCounters, delta);
     this.writeQueue = this.writeQueue.then(async () => {
-      this.globalCounters = await withFileMutationQueue(this.metricsPath, async () => {
-        const totals = await readCounters(this.metricsPath);
+      const canonicalPath = await resolveCanonicalPath(process.cwd(), this.metricsPath);
+      this.globalCounters = await withInterprocessFileMutationLock(canonicalPath, () => withFileMutationQueue(canonicalPath, async () => {
+        const totals = await readCounters(canonicalPath);
         add(totals, delta);
-        await writeCounters(this.metricsPath, totals);
+        await writeCounters(canonicalPath, totals);
         return totals;
-      });
+      }));
     });
     await this.writeQueue;
     return this.snapshot();

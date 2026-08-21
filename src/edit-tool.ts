@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { Type, type Static } from "typebox";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { firstChangedLine, unifiedDiff } from "./diff.ts";
 import { codePointLength, formatColumnLine, formatNumberedLines, joinText, rangeText, replaceColumns, replacementLines, resolveCanonicalPath, sliceColumns, sliceRange, splitText, type SplitText } from "./line-utils.ts";
 import { type ColumnSnapshot, type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
@@ -248,7 +249,7 @@ export async function smartEdit(
   const initialCoverages = edits.map((edit) => lookupCoverage(store, full, edit));
   const initialRevision = store.revision(full);
 
-  return withFileMutationQueue(full, async () => {
+  return withInterprocessFileMutationLock(full, () => withFileMutationQueue(full, async () => {
     if (store.revision(full) !== initialRevision) throw new Error("file stale, read again: snapshot changed while edit was queued");
     const before = await fs.readFile(full, "utf8");
     const parsed = splitText(before);
@@ -324,5 +325,5 @@ export async function smartEdit(
       firstChangedLine: firstChangedLine(before, after),
       delta
     };
-  });
+  }));
 }
