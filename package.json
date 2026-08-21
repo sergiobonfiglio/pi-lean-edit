@@ -1,6 +1,6 @@
 {
   "name": "pi-lean-edit",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Safer, cheaper edits by verifying prior reads in the harness instead of the prompt. Lets the harness verify the model already read the latest text it wants to edit, avoiding old-text replay and hash-decorated reads.",
   "type": "module",
   "keywords": [
@@ -36,9 +36,9 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.81.1",
-    "@earendil-works/pi-ai": "^0.81.1",
-    "@earendil-works/pi-tui": "^0.81.1",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-tui": "^0.84.2",
     "typebox": "*"
   },
   "dependencies": {
