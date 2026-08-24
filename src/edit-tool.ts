@@ -7,24 +7,47 @@ import { codePointLength, formatColumnLine, formatNumberedLines, joinText, range
 import { type ColumnSnapshot, type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 import { type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
 
-const smartEditRangeSchema = Type.Object({
+const lineEditRangeSchema = Type.Object({
   startLine: Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" }),
-  endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine" })),
-  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Range must stay within one source line." })),
-  endColumn: Type.Optional(Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive). Required with startColumn." })),
+  endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine." })),
   newText: Type.String({ description: "Replacement text. Empty string deletes range." })
-});
+}, { additionalProperties: false });
 
-export const smartEditSchema = Type.Object({
-  path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
-  startLine: Type.Optional(Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" })),
-  endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine" })),
-  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Range must stay within one source line." })),
-  endColumn: Type.Optional(Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive). Required with startColumn." })),
-  newText: Type.Optional(Type.String({ description: "Replacement text. Empty string deletes range." })),
-  edits: Type.Optional(Type.Array(smartEditRangeSchema, { minItems: 1, description: "One or more non-overlapping edits for this file." }))
-});
+const columnEditRangeSchema = Type.Object({
+  startLine: Type.Integer({ minimum: 1, description: "Source line containing the columns to replace (1-based)" }),
+  startColumn: Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive)" }),
+  endColumn: Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive)" }),
+  newText: Type.String({ description: "Replacement text, which may contain newlines. Empty string deletes range." })
+}, { additionalProperties: false });
+
+const smartEditRangeSchema = Type.Union([lineEditRangeSchema, columnEditRangeSchema]);
+
+const smartEditVariants = Type.Union([
+  Type.Object({
+    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
+    ...lineEditRangeSchema.properties
+  }, { additionalProperties: false }),
+  Type.Object({
+    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
+    ...columnEditRangeSchema.properties
+  }, { additionalProperties: false }),
+  Type.Object({
+    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
+    edits: Type.Array(smartEditRangeSchema, { minItems: 1, description: "One or more non-overlapping line or single-line column edits for this file." })
+  }, { additionalProperties: false })
+]);
+
+// Tool providers expect the root parameter schema to be an object, even when its shapes are expressed with anyOf.
+export const smartEditSchema = Type.Unsafe<Static<typeof smartEditVariants>>({ type: "object", ...smartEditVariants });
 export type SmartEditInput = Static<typeof smartEditSchema>;
+
+type UnvalidatedEditRange = {
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+  newText?: string;
+};
 
 type NormalizedEdit = {
   startLine: number;
@@ -80,16 +103,30 @@ function validateColumns(edit: NormalizedEdit): void {
 }
 
 function normalizeEdits(input: SmartEditInput): NormalizedEdit[] {
-  const rawEdits = Array.isArray(input.edits) ? input.edits : (() => {
-    if (input.startLine == null || input.newText == null) throw new Error("edit requires startLine and newText, or edits[]");
-    return [{ startLine: input.startLine, endLine: input.endLine, startColumn: input.startColumn, endColumn: input.endColumn, newText: input.newText }];
-  })();
+  const unvalidated = input as unknown as UnvalidatedEditRange & { edits?: UnvalidatedEditRange[] };
+  let rawEdits: UnvalidatedEditRange[];
+  if (Array.isArray(unvalidated.edits)) {
+    if ([unvalidated.startLine, unvalidated.endLine, unvalidated.startColumn, unvalidated.endColumn, unvalidated.newText].some((value) => value != null)) {
+      throw new Error("cannot combine top-level range fields with edits[]");
+    }
+    rawEdits = unvalidated.edits;
+  } else {
+    if (unvalidated.startLine == null || unvalidated.newText == null) throw new Error("edit requires startLine and newText, or edits[]");
+    rawEdits = [unvalidated];
+  }
   if (rawEdits.length === 0) throw new Error("edits must contain at least one range");
   const edits = rawEdits.map((edit) => {
+    if (edit.startLine == null || edit.newText == null) throw new Error("each edit requires startLine and newText");
     const startLine = edit.startLine;
     const endLine = edit.endLine ?? edit.startLine;
     validateRange(startLine, endLine);
-    const normalized: NormalizedEdit = { startLine, endLine, startColumn: edit.startColumn, endColumn: edit.endColumn, newText: edit.newText };
+    const normalized: NormalizedEdit = {
+      startLine,
+      endLine,
+      startColumn: edit.startColumn,
+      endColumn: edit.endColumn,
+      newText: edit.newText
+    };
     validateColumns(normalized);
     return normalized;
   });

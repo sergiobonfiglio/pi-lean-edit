@@ -255,12 +255,12 @@ export default function (pi: ExtensionAPI) {
     name: "edit",
     label: "edit",
     description: "Edit text file by one or more 1-based inclusive line ranges or column ranges within one source line.",
-    promptSnippet: "Edit lines or columns: { path, startLine, endLine?, startColumn?, endColumn?, newText } or { path, edits: [...] }.",
+    promptSnippet: "Edit lines with { path, startLine, endLine?, newText }; edit columns with { path, startLine, startColumn, endColumn, newText }; or batch either shape in edits[].",
     promptGuidelines: [
       "edit: use after read for same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace.",
       "edit: after success, edited ranges require another read or failed edit before reuse; line-count-preserving edits keep unaffected later reads valid.",
-      "edit: use edits[] for multiple non-overlapping ranges; omit endLine for one line; newText: \"\" deletes.",
-      "edit: column ranges stay within one source line and may insert newlines; huge-line column edits require a matching column read."
+      "edit: use edits[] for multiple non-overlapping ranges; do not combine top-level range fields with edits[]; newText: \"\" deletes.",
+      "edit: line ranges use startLine/endLine without columns; column ranges use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
     ],
     parameters: smartEditSchema,
     renderShell: "default",
