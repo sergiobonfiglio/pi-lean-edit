@@ -38,9 +38,14 @@ Only `path` is required. For normal reads, use `path` alone or `offset`/`limit` 
 ### `edit`
 
 ```ts
-{ path: string; startLine: number; endLine?: number; startColumn?: number; endColumn?: number; newText: string }
+type LineRange = { startLine: number; endLine?: number; newText: string };
+type ColumnRange = { startLine: number; startColumn: number; endColumn: number; newText: string };
+
+LineRange & { path: string }
 // or
-{ path: string; edits: Array<{ startLine: number; endLine?: number; startColumn?: number; endColumn?: number; newText: string }> }
+ColumnRange & { path: string }
+// or either range shape in a batch
+{ path: string; edits: Array<LineRange | ColumnRange> }
 ```
 
 `edit` applies one or more non-overlapping inclusive ranges only when the requested text matches text previously shown by `read` or a failed edit. Column ranges must stay within one source line, but their replacement text may contain newlines. If a range was not read or its text changed, the edit is not applied; for line-range edits, the error returns and snapshots the current target with up to five surrounding lines on each side so the same or a nearby corrected edit can be retried. Text beyond the configured automatic output limits still requires `read`. Normal-line column reads show the whole line; huge-line column reads can cover matching column ranges. After a successful edit, edited text must be read again before reuse. Line-count-preserving edits keep unaffected later reads valid; line-count-changing edits invalidate them.
