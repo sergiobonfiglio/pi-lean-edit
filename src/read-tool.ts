@@ -182,7 +182,31 @@ function imageReadResult(text: string, image?: { data: string; mimeType: string 
   };
 }
 
+function readNormalizationWarning(input: SmartReadInput): string | undefined {
+  if (input.columnOffset == null || input.limit == null || input.limit <= 1) return undefined;
+  const ignored = input.columnLimit == null
+    ? `columnOffset=${input.columnOffset}`
+    : `columnOffset=${input.columnOffset} and columnLimit=${input.columnLimit}`;
+  return `Warning: Ignored ${ignored} because column windows support only one line while limit=${input.limit} requests multiple lines.`;
+}
+
+function appendReadWarning(result: SmartReadResult, warning: string | undefined): SmartReadResult {
+  if (!warning) return result;
+  const content = result.content.find((item): item is Extract<SmartReadContent, { type: "text" }> => item.type === "text");
+  if (!content) return result;
+  content.text = `${content.text}\n${warning}`;
+  const truncation = result.details.truncation;
+  if (truncation) {
+    truncation.content = content.text;
+    truncation.outputLines = content.text.split("\n").length;
+    truncation.outputBytes = Buffer.byteLength(content.text, "utf8");
+  }
+  return result;
+}
 export async function smartRead(cwd: string, input: SmartReadInput, config: SmartReadConfig, store: SnapshotStore = snapshotStore, model?: { input?: string[] }, deps: SmartReadDeps = {}): Promise<SmartReadResult> {
+  const normalizationWarning = readNormalizationWarning(input);
+  const columnOffset = normalizationWarning ? undefined : input.columnOffset;
+  const columnLimit = normalizationWarning ? undefined : input.columnLimit;
   const full = await resolveCanonicalPath(cwd, input.path);
   const st = await fs.stat(full);
   if (st.isDirectory()) throw new Error(`Cannot read directory: ${input.path}`);
@@ -194,21 +218,21 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     if (config.autoResizeImages ?? true) {
       const resized = await (deps.resizeImageFn ?? resizeImage)(buf, imageMimeType);
       if (!resized) {
-        return imageReadResult(buildImageReadText(imageMimeType, [
+        return appendReadWarning(imageReadResult(buildImageReadText(imageMimeType, [
           "[Image omitted: could not be resized below the inline image size limit.]",
           nonVisionImageNote
-        ]));
+        ])), normalizationWarning);
       }
-      return imageReadResult(
+      return appendReadWarning(imageReadResult(
         buildImageReadText(resized.mimeType, [formatDimensionNote(resized), nonVisionImageNote]),
         { data: resized.data, mimeType: resized.mimeType }
-      );
+      ), normalizationWarning);
     }
 
-    return imageReadResult(
+    return appendReadWarning(imageReadResult(
       buildImageReadText(imageMimeType, [nonVisionImageNote]),
       { data: buf.toString("base64"), mimeType: imageMimeType }
-    );
+    ), normalizationWarning);
   }
 
   if (isBinary(buf)) throw new Error("smart read supports text only, except supported images");
@@ -218,14 +242,12 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
   const startLine = positiveInteger(input.offset, 1, "offset");
   const requestedLimit = positiveInteger(input.limit, config.maxLines, "limit");
   const limit = Math.min(requestedLimit, config.maxLines);
-  const maxColumns = effectiveMaxColumns(config, input.columnLimit);
+  const maxColumns = effectiveMaxColumns(config, columnLimit);
 
-  if (input.columnOffset != null && input.limit != null && input.limit > 1) throw new Error("columnOffset only supports one line; omit limit or set limit=1");
-
-  if (input.columnOffset != null) {
+  if (columnOffset != null) {
     if (startLine > parsed.lines.length) {
       const out = renderSummary(startLine, startLine - 1, parsed.lines.length, false);
-      return {
+      return appendReadWarning({
         content: [{ type: "text", text: out }],
         details: {
           smartRead: { path: input.path, startLine, endLine: startLine - 1, linesShown: 0, totalLines: parsed.lines.length, truncated: false },
@@ -243,12 +265,12 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
             maxBytes: config.maxBytes
           }
         }
-      };
+      }, normalizationWarning);
     }
 
     const line = parsed.lines[startLine - 1]!;
     const lineLength = codePointLength(line);
-    const startColumn = positiveInteger(input.columnOffset, 1, "columnOffset");
+    const startColumn = positiveInteger(columnOffset, 1, "columnOffset");
     const { endColumn, text: windowText } = fitColumnWindow(startLine, line, startColumn, maxColumns, config.maxBytes);
     const truncated = endColumn < lineLength;
     const hugeLine = fullLineBytes(startLine, line) > config.maxBytes;
@@ -268,7 +290,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     const summary = renderSummary(startLine, startLine, parsed.lines.length, truncated, startColumn, endColumn);
     const next = truncated ? `Continue with offset=${startLine} columnOffset=${endColumn + 1}.` : "";
     const out = [numbered, summary, next].filter(Boolean).join("\n");
-    return {
+    return appendReadWarning({
       content: [{ type: "text", text: out }],
       details: {
         smartRead: { path: input.path, startLine, endLine: startLine, linesShown: 1, totalLines: parsed.lines.length, truncated, startColumn, endColumn },
@@ -286,7 +308,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
           maxBytes: config.maxBytes
         }
       }
-    };
+    }, normalizationWarning);
   }
 
   const shown: string[] = [];
@@ -360,7 +382,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
   const out = [numberedLines, hugeRendered, summary, next].filter(Boolean).join("\n");
   const outputBytes = Buffer.byteLength(out, "utf8");
 
-  return {
+  return appendReadWarning({
     content: [{ type: "text", text: out }],
     details: {
       smartRead: {
@@ -387,5 +409,5 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
         maxBytes: config.maxBytes
       }
     }
-  };
+  }, normalizationWarning);
 }
