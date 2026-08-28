@@ -82,3 +82,61 @@ test("non-image binary files are still rejected", async () => {
   const { dir, file } = await tempFile("data.bin", binary);
   await assert.rejects(() => smartRead(dir, { path: file }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 }), /supports text only, except supported images/);
 });
+
+test("multi-line reads ignore supplied column window parameters with a warning", async () => {
+  const { dir, file } = await tempFile("mixed-range.txt", Buffer.from("alpha\nbravo\ncharlie\ndelta\n", "utf8"));
+  const result = await smartRead(dir, {
+    path: file,
+    offset: 1,
+    limit: 3,
+    columnOffset: 2,
+    columnLimit: 4
+  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
+  const content = result.content[0];
+
+  assert.equal(content?.type, "text");
+  if (content?.type !== "text") return;
+  assert.match(content.text, /^1 │ alpha\n2 │ bravo\n3 │ charlie\n/);
+  assert.match(content.text, /Warning: Ignored columnOffset=2 and columnLimit=4 because column windows support only one line while limit=3 requests multiple lines\.$/);
+  assert.equal(result.details.smartRead?.startLine, 1);
+  assert.equal(result.details.smartRead?.endLine, 3);
+  assert.equal(result.details.smartRead?.startColumn, undefined);
+  assert.equal(result.details.smartRead?.endColumn, undefined);
+  assert.equal(result.details.truncation?.content, content.text);
+});
+
+test("multi-line normalization only names columnOffset when columnLimit is absent", async () => {
+  const { dir, file } = await tempFile("mixed-offset.txt", Buffer.from("one\ntwo\nthree\n", "utf8"));
+  const result = await smartRead(dir, {
+    path: file,
+    offset: 1,
+    limit: 2,
+    columnOffset: 99
+  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
+  const content = result.content[0];
+
+  assert.equal(content?.type, "text");
+  if (content?.type !== "text") return;
+  assert.match(content.text, /^1 │ one\n2 │ two\n/);
+  assert.match(content.text, /Warning: Ignored columnOffset=99 because column windows support only one line while limit=2 requests multiple lines\.$/);
+  assert.doesNotMatch(content.text, /columnLimit/);
+});
+
+test("valid single-line column reads remain column windows", async () => {
+  const { dir, file } = await tempFile("column-window.txt", Buffer.from("alpha\nbravo\ncharlie\n", "utf8"));
+  const result = await smartRead(dir, {
+    path: file,
+    offset: 2,
+    limit: 1,
+    columnOffset: 2,
+    columnLimit: 3
+  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
+  const content = result.content[0];
+
+  assert.equal(content?.type, "text");
+  if (content?.type !== "text") return;
+  assert.match(content.text, /^2:2-4 │ rav\nShowing lines 2:2-4 of 3 \(truncated\)\./);
+  assert.doesNotMatch(content.text, /Warning:/);
+  assert.equal(result.details.smartRead?.startColumn, 2);
+  assert.equal(result.details.smartRead?.endColumn, 4);
+});

@@ -234,12 +234,8 @@ export default function (pi: ExtensionAPI) {
     parameters: smartReadSchema,
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      try {
-        const result = await smartRead(ctx.cwd, params, config, undefined, ctx?.model);
-        return { content: result.content, details: result.details };
-      } catch (e) {
-        return { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }], isError: true, details: {} };
-      }
+      const result = await smartRead(ctx.cwd, params, config, undefined, ctx?.model);
+      return { content: result.content, details: result.details };
     },
     renderCall(args, theme, context) {
       return renderWithExpansion(renderLevel("read", context.expanded), context, (adjusted) => renderSmartReadCall(args, theme, adjusted));
@@ -279,11 +275,7 @@ export default function (pi: ExtensionAPI) {
         const msg = e instanceof StaleEditError
           ? `${e.message}\nCurrent text:\n${e.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
           : e instanceof Error ? e.message : String(e);
-        return {
-          content: [{ type: "text", text: `${msg}\n${statsLine(snapshot)}` }],
-          isError: true,
-          details: mergeMetricsDetails({}, delta, snapshot)
-        };
+        throw new Error(`${msg}\n${statsLine(snapshot)}`);
       }
     },
     renderCall(args, theme, context) {
