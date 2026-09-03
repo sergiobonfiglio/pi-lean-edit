@@ -5,7 +5,7 @@ import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { firstChangedLine, unifiedDiff } from "./diff.ts";
 import { codePointLength, formatColumnLine, formatNumberedLines, joinText, rangeText, replaceColumns, replacementLines, resolveCanonicalPath, sliceColumns, sliceRange, splitText, type SplitText } from "./line-utils.ts";
 import { type ColumnSnapshot, type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
-import { type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
+import { type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 
 const lineEditRangeSchema = Type.Object({
   startLine: Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" }),
@@ -20,9 +20,9 @@ const columnEditRangeSchema = Type.Object({
   newText: Type.String({ description: "Replacement text, which may contain newlines. Empty string deletes range." })
 }, { additionalProperties: false });
 
-const smartEditRangeSchema = Type.Union([lineEditRangeSchema, columnEditRangeSchema]);
+const leanEditRangeSchema = Type.Union([lineEditRangeSchema, columnEditRangeSchema]);
 
-const smartEditVariants = Type.Union([
+const leanEditVariants = Type.Union([
   Type.Object({
     path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
     ...lineEditRangeSchema.properties
@@ -33,13 +33,13 @@ const smartEditVariants = Type.Union([
   }, { additionalProperties: false }),
   Type.Object({
     path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
-    edits: Type.Array(smartEditRangeSchema, { minItems: 1, description: "One or more non-overlapping line or single-line column edits for this file." })
+    edits: Type.Array(leanEditRangeSchema, { minItems: 1, description: "One or more non-overlapping line or single-line column edits for this file." })
   }, { additionalProperties: false })
 ]);
 
 // Tool providers expect the root parameter schema to be an object, even when its shapes are expressed with anyOf.
-export const smartEditSchema = Type.Unsafe<Static<typeof smartEditVariants>>({ type: "object", ...smartEditVariants });
-export type SmartEditInput = Static<typeof smartEditSchema>;
+export const leanEditSchema = Type.Unsafe<Static<typeof leanEditVariants>>({ type: "object", ...leanEditVariants });
+export type LeanEditInput = Static<typeof leanEditSchema>;
 
 type UnvalidatedEditRange = {
   startLine?: number;
@@ -61,15 +61,15 @@ type SnapshotCoverage =
   | { kind: "full-line"; lines: string[] }
   | { kind: "column"; snapshot: ColumnSnapshot };
 
-export type SmartEditResult = {
+export type LeanEditResult = {
   text: string;
   diff: string;
   firstChangedLine?: number;
-  delta: SmartEditDelta;
-  metrics?: SmartEditMetricsSnapshot;
+  delta: LeanEditDelta;
+  metrics?: LeanEditMetricsSnapshot;
 };
 
-export type SmartEditConfig = {
+export type LeanEditConfig = {
   maxLines: number;
   maxBytes: number;
   maxColumns?: number;
@@ -102,7 +102,7 @@ function validateColumns(edit: NormalizedEdit): void {
   if (edit.endColumn! < edit.startColumn!) throw new Error("endColumn must be >= startColumn");
 }
 
-function normalizeEdits(input: SmartEditInput): NormalizedEdit[] {
+function normalizeEdits(input: LeanEditInput): NormalizedEdit[] {
   const unvalidated = input as unknown as UnvalidatedEditRange & { edits?: UnvalidatedEditRange[] };
   let rawEdits: UnvalidatedEditRange[];
   if (Array.isArray(unvalidated.edits)) {
@@ -160,10 +160,10 @@ function editAddressSize(edit: NormalizedEdit): number {
   return parts.join("").length;
 }
 
-function multiSuccessDelta(parts: Array<{ oldText: string; edit: NormalizedEdit }>): SmartEditDelta {
+function multiSuccessDelta(parts: Array<{ oldText: string; edit: NormalizedEdit }>): LeanEditDelta {
   const charsNormalEdit = parts.reduce((sum, part) => sum + part.oldText.length + part.edit.newText.length, 0);
-  const charsSmartEdit = parts.reduce((sum, part) => sum + editAddressSize(part.edit) + part.edit.newText.length, 0);
-  return { attempts: 1, failures: 0, charsSaved: Math.max(0, charsNormalEdit - charsSmartEdit), charsNormalEdit, charsSmartEdit };
+  const charsLeanEdit = parts.reduce((sum, part) => sum + editAddressSize(part.edit) + part.edit.newText.length, 0);
+  return { attempts: 1, failures: 0, charsSaved: Math.max(0, charsNormalEdit - charsLeanEdit), charsNormalEdit, charsLeanEdit };
 }
 
 function lookupCoverage(store: SnapshotStore, full: string, edit: NormalizedEdit): SnapshotCoverage | undefined {
@@ -186,7 +186,7 @@ function coverageMatches(edit: NormalizedEdit, coverage: SnapshotCoverage, realL
   return expected === actual;
 }
 
-function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: Array<SnapshotCoverage | undefined>, parsed: SplitText, config: SmartEditConfig): string | undefined {
+function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], coverages: Array<SnapshotCoverage | undefined>, parsed: SplitText, config: LeanEditConfig): string | undefined {
   const contextLines = 5;
   const lineRanges: Array<{ startLine: number; endLine: number }> = [];
   for (const edit of edits) {
@@ -273,12 +273,12 @@ function invalidateSnapshotsAfterEdit(store: SnapshotStore, path: string, edits:
   if (preservedPrefixEdits.length) store.invalidateRanges(path, preservedPrefixEdits);
 }
 
-export async function smartEdit(
+export async function leanEdit(
   cwd: string,
-  input: SmartEditInput,
+  input: LeanEditInput,
   store: SnapshotStore = snapshotStore,
-  config: SmartEditConfig = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 }
-): Promise<SmartEditResult> {
+  config: LeanEditConfig = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 }
+): Promise<LeanEditResult> {
   const invocationRevision = store.revision();
   const edits = normalizeEdits(input);
   const full = await resolveCanonicalPath(cwd, input.path);

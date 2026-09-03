@@ -2,8 +2,6 @@
 
 Safer, cheaper edits by verifying prior reads in the harness instead of the prompt.
 
-> Formerly `pi-smart-edit`.
-
 `pi-lean-edit` lets the harness verify the model already read the latest text it wants to edit, reducing stale-edit failures without resending old text in edit requests and without the per-read overhead of hash-decorated output.
 ## Install or test
 

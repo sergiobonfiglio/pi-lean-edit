@@ -1,17 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Check } from "typebox/value";
-import { smartEdit, smartEditSchema } from "../src/edit-tool.ts";
+import { leanEdit, leanEditSchema } from "../src/edit-tool.ts";
 
 test("edit schema separates line and column ranges", () => {
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     startLine: 14,
     endLine: 20,
     newText: "replacement"
   }), true);
 
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     startLine: 14,
     startColumn: 1,
@@ -19,7 +19,7 @@ test("edit schema separates line and column ranges", () => {
     newText: "first\nsecond"
   }), true);
 
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     startLine: 14,
     endLine: 20,
@@ -30,7 +30,7 @@ test("edit schema separates line and column ranges", () => {
 });
 
 test("edit schema separates direct and batched forms", () => {
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     edits: [
       { startLine: 1, newText: "line" },
@@ -38,14 +38,14 @@ test("edit schema separates direct and batched forms", () => {
     ]
   }), true);
 
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     startLine: 1,
     newText: "line",
     edits: [{ startLine: 1, newText: "line" }]
   }), false);
 
-  assert.equal(Check(smartEditSchema, {
+  assert.equal(Check(leanEditSchema, {
     path: "file.txt",
     edits: [{
       startLine: 14,
@@ -58,7 +58,7 @@ test("edit schema separates direct and batched forms", () => {
 });
 
 test("edit runtime defensively rejects invalid schema combinations", async () => {
-  await assert.rejects(() => smartEdit(process.cwd(), {
+  await assert.rejects(() => leanEdit(process.cwd(), {
     path: "file.txt",
     startLine: 14,
     endLine: 20,
@@ -67,7 +67,7 @@ test("edit runtime defensively rejects invalid schema combinations", async () =>
     newText: "replacement"
   } as never), /column edits must stay within one line/);
 
-  await assert.rejects(() => smartEdit(process.cwd(), {
+  await assert.rejects(() => leanEdit(process.cwd(), {
     path: "file.txt",
     startLine: 1,
     newText: "line",

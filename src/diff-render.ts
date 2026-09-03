@@ -33,7 +33,7 @@ function renderChangedRun(run: Array<{ sign: "-" | "+"; lineNo: number; text: st
   return out;
 }
 
-export function renderDiffForSmartEdit(diffText: string, theme: any): string {
+export function renderDiffForLeanEdit(diffText: string, theme: any): string {
   const out: string[] = [];
   let run: Array<{ sign: "-" | "+"; lineNo: number; text: string }> = [];
   let oldLine = 0;

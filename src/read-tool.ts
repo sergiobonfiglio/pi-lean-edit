@@ -4,34 +4,34 @@ import { Type, type Static } from "typebox";
 import { codePointLength, formatColumnLine, formatNumberedLines, isBinary, resolveCanonicalPath, sliceColumns, splitText } from "./line-utils.ts";
 import { type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 
-export const smartReadSchema = Type.Object({
+export const leanReadSchema = Type.Object({
   path: Type.String({ description: "Required. Path to the file to read (relative or absolute)." }),
   offset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed line at which to start reading." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum number of lines to read." })),
   columnOffset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed column at which to start a single-line window; use only for huge lines." })),
   columnLimit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum columns in a single-line window. Use only with columnOffset." }))
 });
-export type SmartReadInput = Static<typeof smartReadSchema>;
+export type LeanReadInput = Static<typeof leanReadSchema>;
 
-export type SmartReadConfig = {
+export type LeanReadConfig = {
   maxLines: number;
   maxBytes: number;
   maxColumns?: number;
   autoResizeImages?: boolean;
 };
 
-type SmartReadDeps = {
+type LeanReadDeps = {
   resizeImageFn?: typeof resizeImage;
 };
 
-type SmartReadContent =
+type LeanReadContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
 
-export type SmartReadResult = {
-  content: SmartReadContent[];
+export type LeanReadResult = {
+  content: LeanReadContent[];
   details: {
-    smartRead?: {
+    leanRead?: {
       path: string;
       startLine: number;
       endLine: number;
@@ -65,7 +65,7 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return n;
 }
 
-function effectiveMaxColumns(config: SmartReadConfig, inputLimit?: number): number {
+function effectiveMaxColumns(config: LeanReadConfig, inputLimit?: number): number {
   const configured = positiveInteger(config.maxColumns, DEFAULT_MAX_COLUMNS, "maxColumns");
   return Math.min(configured, positiveInteger(inputLimit, configured, "columnLimit"));
 }
@@ -175,14 +175,14 @@ function buildImageReadText(mimeType: string, notes: Array<string | undefined>):
   return [`Read image file [${mimeType}]`, ...notes.filter((note): note is string => Boolean(note))].join("\n");
 }
 
-function imageReadResult(text: string, image?: { data: string; mimeType: string }): SmartReadResult {
+function imageReadResult(text: string, image?: { data: string; mimeType: string }): LeanReadResult {
   return {
     content: image ? [{ type: "text", text }, { type: "image", data: image.data, mimeType: image.mimeType }] : [{ type: "text", text }],
     details: {}
   };
 }
 
-function readNormalizationWarning(input: SmartReadInput): string | undefined {
+function readNormalizationWarning(input: LeanReadInput): string | undefined {
   if (input.columnOffset == null || input.limit == null || input.limit <= 1) return undefined;
   const ignored = input.columnLimit == null
     ? `columnOffset=${input.columnOffset}`
@@ -190,9 +190,9 @@ function readNormalizationWarning(input: SmartReadInput): string | undefined {
   return `Warning: Ignored ${ignored} because column windows support only one line while limit=${input.limit} requests multiple lines.`;
 }
 
-function appendReadWarning(result: SmartReadResult, warning: string | undefined): SmartReadResult {
+function appendReadWarning(result: LeanReadResult, warning: string | undefined): LeanReadResult {
   if (!warning) return result;
-  const content = result.content.find((item): item is Extract<SmartReadContent, { type: "text" }> => item.type === "text");
+  const content = result.content.find((item): item is Extract<LeanReadContent, { type: "text" }> => item.type === "text");
   if (!content) return result;
   content.text = `${content.text}\n${warning}`;
   const truncation = result.details.truncation;
@@ -203,7 +203,7 @@ function appendReadWarning(result: SmartReadResult, warning: string | undefined)
   }
   return result;
 }
-export async function smartRead(cwd: string, input: SmartReadInput, config: SmartReadConfig, store: SnapshotStore = snapshotStore, model?: { input?: string[] }, deps: SmartReadDeps = {}): Promise<SmartReadResult> {
+export async function leanRead(cwd: string, input: LeanReadInput, config: LeanReadConfig, store: SnapshotStore = snapshotStore, model?: { input?: string[] }, deps: LeanReadDeps = {}): Promise<LeanReadResult> {
   const normalizationWarning = readNormalizationWarning(input);
   const columnOffset = normalizationWarning ? undefined : input.columnOffset;
   const columnLimit = normalizationWarning ? undefined : input.columnLimit;
@@ -235,7 +235,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     ), normalizationWarning);
   }
 
-  if (isBinary(buf)) throw new Error("smart read supports text only, except supported images");
+  if (isBinary(buf)) throw new Error("lean read supports text only, except supported images");
 
   const text = buf.toString("utf8");
   const parsed = splitText(text);
@@ -250,7 +250,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
       return appendReadWarning({
         content: [{ type: "text", text: out }],
         details: {
-          smartRead: { path: input.path, startLine, endLine: startLine - 1, linesShown: 0, totalLines: parsed.lines.length, truncated: false },
+          leanRead: { path: input.path, startLine, endLine: startLine - 1, linesShown: 0, totalLines: parsed.lines.length, truncated: false },
           truncation: {
             content: out,
             truncated: false,
@@ -293,7 +293,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
     return appendReadWarning({
       content: [{ type: "text", text: out }],
       details: {
-        smartRead: { path: input.path, startLine, endLine: startLine, linesShown: 1, totalLines: parsed.lines.length, truncated, startColumn, endColumn },
+        leanRead: { path: input.path, startLine, endLine: startLine, linesShown: 1, totalLines: parsed.lines.length, truncated, startColumn, endColumn },
         truncation: {
           content: out,
           truncated,
@@ -385,7 +385,7 @@ export async function smartRead(cwd: string, input: SmartReadInput, config: Smar
   return appendReadWarning({
     content: [{ type: "text", text: out }],
     details: {
-      smartRead: {
+      leanRead: {
         path: input.path,
         startLine,
         endLine,

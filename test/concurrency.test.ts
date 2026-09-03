@@ -7,8 +7,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import leanEditExtension from "../src/index.ts";
-import { smartEdit } from "../src/edit-tool.ts";
-import { smartRead } from "../src/read-tool.ts";
+import { leanEdit } from "../src/edit-tool.ts";
+import { leanRead } from "../src/read-tool.ts";
 import { SnapshotStore } from "../src/snapshot-store.ts";
 
 const workerPath = fileURLToPath(new URL("./fixtures/concurrency-worker.ts", import.meta.url));
@@ -81,14 +81,14 @@ async function runCompetingEdits(t: test.TestContext, secondLine: number): Promi
   return { file, first, second };
 }
 
-test("separate processes preserve non-overlapping smart edits", async (t) => {
+test("separate processes preserve non-overlapping lean edits", async (t) => {
   const { file, first, second } = await runCompetingEdits(t, 2);
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(await fs.readFile(file, "utf8"), "ONE-A\nTWO-B\n");
 });
 
-test("separate processes reject a stale competing smart edit", async (t) => {
+test("separate processes reject a stale competing lean edit", async (t) => {
   const { file, first, second } = await runCompetingEdits(t, 1);
   assert.equal(first.ok, true);
   assert.equal(second.ok, false);
@@ -97,7 +97,7 @@ test("separate processes reject a stale competing smart edit", async (t) => {
   assert.equal(await fs.readFile(file, "utf8"), "ONE-A\ntwo\n");
 });
 
-test("write wrapper and smart edit share lock ordering", async (t) => {
+test("write wrapper and lean edit share lock ordering", async (t) => {
   const { dir, file } = await tempFile(t);
   const tools: Array<any> = [];
   leanEditExtension({
@@ -110,7 +110,7 @@ test("write wrapper and smart edit share lock ordering", async (t) => {
 
   const store = new SnapshotStore();
   const config = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 };
-  await smartRead(dir, { path: file }, config, store);
+  await leanRead(dir, { path: file }, config, store);
   let releaseQueue!: () => void;
   let queueEntered!: () => void;
   const queueReady = new Promise<void>((resolve) => { queueEntered = resolve; });
@@ -120,7 +120,7 @@ test("write wrapper and smart edit share lock ordering", async (t) => {
 
   const writeResult = write.execute("write", { path: file, content: "written\n" }, undefined, undefined, { cwd: dir });
   await waitForLock(file);
-  const editResult = smartEdit(dir, { path: file, startLine: 1, newText: "edited" }, store, config);
+  const editResult = leanEdit(dir, { path: file, startLine: 1, newText: "edited" }, store, config);
   releaseQueue();
   await Promise.all([queueHolder, writeResult]);
   await assert.rejects(() => editResult, /requested text changed since it was read/);
@@ -139,6 +139,6 @@ test("separate processes retain every metrics increment", async (t) => {
   const results = await Promise.all(done);
   assert.ok(results.every((result) => result.ok));
   const counters = JSON.parse(await fs.readFile(metricsPath, "utf8"));
-  assert.deepEqual(counters, { attempts: 6, failures: 0, charsSaved: 12, charsNormalEdit: 18, charsSmartEdit: 6 });
+  assert.deepEqual(counters, { attempts: 6, failures: 0, charsSaved: 12, charsNormalEdit: 18, charsLeanEdit: 6 });
   assert.deepEqual((await fs.readdir(dir)).sort(), ["metrics.json"]);
 });

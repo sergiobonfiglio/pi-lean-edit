@@ -2,17 +2,17 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
-import { smartRead, smartReadSchema, type SmartReadResult } from "./read-tool.ts";
-import { smartEdit, smartEditSchema, StaleEditError } from "./edit-tool.ts";
-import { failureDelta, formatSmartEditStats, SmartEditMetricsStore, type SmartEditDelta, type SmartEditMetricsSnapshot } from "./metrics.ts";
+import { leanRead, leanReadSchema, type LeanReadResult } from "./read-tool.ts";
+import { leanEdit, leanEditSchema, StaleEditError } from "./edit-tool.ts";
+import { failureDelta, formatLeanEditStats, LeanEditMetricsStore, type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
-import { renderDiffForSmartEdit } from "./diff-render.ts";
+import { renderDiffForLeanEdit } from "./diff-render.ts";
 import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./render-expansion.ts";
 import { resolveCanonicalPath } from "./line-utils.ts";
 import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 
-function mergeMetricsDetails(details: Record<string, any>, delta: SmartEditDelta, snapshot: SmartEditMetricsSnapshot): Record<string, any> {
-  return { ...details, smartEditMetrics: { delta, snapshot } };
+function mergeMetricsDetails(details: Record<string, any>, delta: LeanEditDelta, snapshot: LeanEditMetricsSnapshot): Record<string, any> {
+  return { ...details, leanEditMetrics: { delta, snapshot } };
 }
 
 function formatLineCount(count: number): string {
@@ -24,9 +24,9 @@ function diffStatMarks(count: number, mark: string, forceNumber = false): string
   return `${mark}${count}`;
 }
 
-type SmartReadCallArgs = { path?: string; offset?: number; limit?: number; columnOffset?: number };
+type LeanReadCallArgs = { path?: string; offset?: number; limit?: number; columnOffset?: number };
 
-type SmartEditCallArgs = {
+type LeanEditCallArgs = {
   path?: string;
   startLine?: number;
   endLine?: number;
@@ -49,20 +49,20 @@ type ToolResult<TDetails = Record<string, unknown>> = {
   isError?: boolean;
 };
 
-type SmartReadRenderState = {
-  smartReadSummary?: NonNullable<SmartReadResult["details"]["smartRead"]>;
-  smartReadSummaryKey?: string;
+type LeanReadRenderState = {
+  leanReadSummary?: NonNullable<LeanReadResult["details"]["leanRead"]>;
+  leanReadSummaryKey?: string;
 };
 
-type SmartEditRenderState = {
-  smartEditStat?: { added: number; removed: number };
-  smartEditSummaryKey?: string;
+type LeanEditRenderState = {
+  leanEditStat?: { added: number; removed: number };
+  leanEditSummaryKey?: string;
 };
 
-function renderSmartReadCall(args: SmartReadCallArgs, theme: any, context: { state: SmartReadRenderState }) {
+function renderLeanReadCall(args: LeanReadCallArgs, theme: any, context: { state: LeanReadRenderState }) {
   let text = theme.fg("toolTitle", theme.bold("read "));
   text += theme.fg("accent", args?.path ?? "");
-  const summary = context?.state?.smartReadSummary;
+  const summary = context?.state?.leanReadSummary;
   if (summary && summary.path === args?.path) {
     const suffix = summary.startColumn != null && summary.endColumn != null
       ? `:${summary.startLine}:${summary.startColumn}-${summary.endColumn}`
@@ -91,7 +91,7 @@ function getTextItem(result: ToolResult): TextContent | undefined {
 }
 
 // Mirrors built-in read getTextOutput image fallback behavior when images are hidden/unsupported.
-function getSmartReadTextOutput(result: ToolResult, showImages: boolean): string {
+function getLeanReadTextOutput(result: ToolResult, showImages: boolean): string {
   if (!result) return "";
   const content = result.content ?? [];
   const textBlocks = content.filter((c): c is TextContent => c.type === "text");
@@ -108,18 +108,18 @@ function getSmartReadTextOutput(result: ToolResult, showImages: boolean): string
   return output;
 }
 
-function renderSmartReadResult(result: ToolResult<SmartReadResult["details"]>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { showImages: boolean; state: SmartReadRenderState; invalidate: () => void }) {
+function renderLeanReadResult(result: ToolResult<LeanReadResult["details"]>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { showImages: boolean; state: LeanReadRenderState; invalidate: () => void }) {
   if (isPartial) return new Text(theme.fg("warning", "Reading..."), 0, 0);
-  const text = getSmartReadTextOutput(result, context.showImages);
+  const text = getLeanReadTextOutput(result, context.showImages);
   if (!text) return new Container();
   if (result.isError) return new Text(theme.fg("error", text.split("\n")[0] ?? text), 0, 0);
 
-  const summary = result.details?.smartRead;
+  const summary = result.details?.leanRead;
   if (summary) {
     const stateKey = JSON.stringify([summary.path, summary.linesShown, summary.startLine, summary.endLine]);
-    if (context.state.smartReadSummaryKey !== stateKey) {
-      context.state.smartReadSummaryKey = stateKey;
-      context.state.smartReadSummary = summary;
+    if (context.state.leanReadSummaryKey !== stateKey) {
+      context.state.leanReadSummaryKey = stateKey;
+      context.state.leanReadSummary = summary;
       context.invalidate();
     }
   }
@@ -136,19 +136,19 @@ function formatEditRange(edit: { startLine?: number; endLine?: number; startColu
   return edit.startColumn != null && edit.endColumn != null ? `${linePart}:${edit.startColumn}-${edit.endColumn}` : linePart;
 }
 
-function formatEditRanges(args: SmartEditCallArgs): string[] {
+function formatEditRanges(args: LeanEditCallArgs): string[] {
   if (Array.isArray(args.edits)) return args.edits.map(formatEditRange).filter((range): range is string => Boolean(range));
   const range = formatEditRange(args);
   return range ? [range] : [];
 }
 
-function renderSmartEditCall(args: SmartEditCallArgs, theme: any, context: { state: SmartEditRenderState }) {
+function renderLeanEditCall(args: LeanEditCallArgs, theme: any, context: { state: LeanEditRenderState }) {
   let text = theme.fg("toolTitle", theme.bold("edit "));
   text += theme.fg("accent", args?.path ?? "");
   const ranges = formatEditRanges(args);
   if (ranges.length) text += theme.fg("dim", `:${ranges.join(",")}`);
 
-  const stat = context?.state?.smartEditStat;
+  const stat = context?.state?.leanEditStat;
   if (stat && typeof stat.added === "number" && typeof stat.removed === "number") {
     const forceNumber = stat.added > 20 || stat.removed > 20;
     text += ` ${theme.fg("muted", `${stat.added + stat.removed} `)}${theme.fg("success", diffStatMarks(stat.added, "+", forceNumber))}${theme.fg("error", diffStatMarks(stat.removed, "-", forceNumber))}`;
@@ -156,7 +156,7 @@ function renderSmartEditCall(args: SmartEditCallArgs, theme: any, context: { sta
   return new Text(text, 0, 0);
 }
 
-function renderSmartEditResult(result: ToolResult<{ diff?: string; firstChangedLine?: number }>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { state: SmartEditRenderState; invalidate: () => void }) {
+function renderLeanEditResult(result: ToolResult<{ diff?: string; firstChangedLine?: number }>, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { state: LeanEditRenderState; invalidate: () => void }) {
   if (isPartial) return new Text(theme.fg("warning", "Editing..."), 0, 0);
   const item = getTextItem(result);
   if (!item) return new Text("", 0, 0);
@@ -172,19 +172,19 @@ function renderSmartEditResult(result: ToolResult<{ diff?: string; firstChangedL
   if (typeof diff === "string" && diff.length > 0) {
     const stat = diffStat(diff);
     const stateKey = JSON.stringify([result.details?.firstChangedLine, stat.added, stat.removed]);
-    if (context.state.smartEditSummaryKey !== stateKey) {
-      context.state.smartEditSummaryKey = stateKey;
-      context.state.smartEditStat = stat;
+    if (context.state.leanEditSummaryKey !== stateKey) {
+      context.state.leanEditSummaryKey = stateKey;
+      context.state.leanEditStat = stat;
       context.invalidate();
     }
-    if (expanded) return new Text("\n" + renderDiffForSmartEdit(diff, theme), 0, 0);
+    if (expanded) return new Text("\n" + renderDiffForLeanEdit(diff, theme), 0, 0);
     return new Container();
   }
 
   return new Text(theme.fg("success", lines[0] || "Applied"), 0, 0);
 }
 
-function statsLine(snapshot: SmartEditMetricsSnapshot): string {
+function statsLine(snapshot: LeanEditMetricsSnapshot): string {
   return `lean_edit session saved=${snapshot.session.charsSaved} failure=${(snapshot.session.failureRate * 100).toFixed(1)}% global saved=${snapshot.global.charsSaved} failure=${(snapshot.global.failureRate * 100).toFixed(1)}%`;
 }
 
@@ -219,9 +219,9 @@ export default function (pi: ExtensionAPI) {
   };
   const renderLevel = (tool: ExpansionTool, expanded: boolean) => renderingSettings[expanded ? "expanded" : "collapsed"][tool];
   const writeTool = createWriteToolDefinition(process.cwd());
-  const metrics = new SmartEditMetricsStore();
+  const metrics = new LeanEditMetricsStore();
 
-  pi.registerTool<typeof smartReadSchema, SmartReadResult["details"], SmartReadRenderState>({
+  pi.registerTool<typeof leanReadSchema, LeanReadResult["details"], LeanReadRenderState>({
     name: "read",
     label: "read",
     description: "Read text file contents with line numbers or a single-line column window for huge lines. Required: path. Optional: offset and limit for line ranges; columnOffset and columnLimit only for huge-line windows. Supports jpg, png, gif, and webp images as attachments.",
@@ -231,23 +231,23 @@ export default function (pi: ExtensionAPI) {
       "read: use offset/limit to inspect exact lines you may edit.",
       "read: use columnOffset with columnLimit only for a huge single line; omit limit or set limit=1."
     ],
-    parameters: smartReadSchema,
+    parameters: leanReadSchema,
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const result = await smartRead(ctx.cwd, params, config, undefined, ctx?.model);
+      const result = await leanRead(ctx.cwd, params, config, undefined, ctx?.model);
       return { content: result.content, details: result.details };
     },
     renderCall(args, theme, context) {
-      return renderWithExpansion(renderLevel("read", context.expanded), context, (adjusted) => renderSmartReadCall(args, theme, adjusted));
+      return renderWithExpansion(renderLevel("read", context.expanded), context, (adjusted) => renderLeanReadCall(args, theme, adjusted));
     },
     renderResult(result, options, theme, context) {
       return renderWithExpansion(renderLevel("read", options.expanded), context, (adjusted) =>
-        renderSmartReadResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+        renderLeanReadResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
       );
     }
   });
 
-  pi.registerTool<typeof smartEditSchema, { diff?: string; firstChangedLine?: number }, SmartEditRenderState>({
+  pi.registerTool<typeof leanEditSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
     name: "edit",
     label: "edit",
     description: "Edit text file by one or more 1-based inclusive line ranges or column ranges within one source line.",
@@ -258,11 +258,11 @@ export default function (pi: ExtensionAPI) {
       "edit: use edits[] for multiple non-overlapping ranges; do not combine top-level range fields with edits[]; newText: \"\" deletes.",
       "edit: line ranges use startLine/endLine without columns; column ranges use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
     ],
-    parameters: smartEditSchema,
+    parameters: leanEditSchema,
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        const result = await smartEdit(ctx.cwd, params, undefined, config);
+        const result = await leanEdit(ctx.cwd, params, undefined, config);
         const snapshot = await metrics.record(result.delta);
         const text = `${result.text}\n${statsLine(snapshot)}`;
         return {
@@ -279,11 +279,11 @@ export default function (pi: ExtensionAPI) {
       }
     },
     renderCall(args, theme, context) {
-      return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderSmartEditCall(args, theme, adjusted));
+      return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderLeanEditCall(args, theme, adjusted));
     },
     renderResult(result, options, theme, context) {
       return renderWithExpansion(renderLevel("edit", options.expanded), context, (adjusted) =>
-        renderSmartEditResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+        renderLeanEditResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
       );
     }
   });
@@ -358,7 +358,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("lean-edit-stats", {
     description: "Show lean edit session/global failure rate and saved characters.",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(formatSmartEditStats(metrics.snapshot()), "info");
+      ctx.ui.notify(formatLeanEditStats(metrics.snapshot()), "info");
     }
   });
 
@@ -375,7 +375,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: event.systemPrompt + "\n\nSmart editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Line-count-preserving edits keep unaffected later reads valid. If requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace. newText: \"\" deletes."
+      systemPrompt: event.systemPrompt + "\n\nLean editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Line-count-preserving edits keep unaffected later reads valid. If requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace. newText: \"\" deletes."
     };
   });
 }

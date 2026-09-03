@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
-import { smartEdit, StaleEditError } from "../../src/edit-tool.ts";
-import { SmartEditMetricsStore } from "../../src/metrics.ts";
-import { smartRead } from "../../src/read-tool.ts";
+import { leanEdit, StaleEditError } from "../../src/edit-tool.ts";
+import { LeanEditMetricsStore } from "../../src/metrics.ts";
+import { leanRead } from "../../src/read-tool.ts";
 import { SnapshotStore } from "../../src/snapshot-store.ts";
 
 const config = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 };
@@ -24,7 +24,7 @@ async function runEdit(): Promise<void> {
   const file = process.env.FILE!;
   const cwd = process.env.CWD!;
   const store = new SnapshotStore();
-  await smartRead(cwd, { path: file }, config, store);
+  await leanRead(cwd, { path: file }, config, store);
   send("snapshotted");
   await waitFor("start");
 
@@ -46,7 +46,7 @@ async function runEdit(): Promise<void> {
   }
 
   try {
-    await smartEdit(cwd, { path: file, startLine: Number(process.env.LINE), newText: process.env.TEXT! }, store, config);
+    await leanEdit(cwd, { path: file, startLine: Number(process.env.LINE), newText: process.env.TEXT! }, store, config);
     send("done", { ok: true });
   } catch (error) {
     send("done", {
@@ -60,8 +60,8 @@ async function runEdit(): Promise<void> {
 async function runMetrics(): Promise<void> {
   send("ready");
   await waitFor("start");
-  const store = new SmartEditMetricsStore(process.env.METRICS_PATH!);
-  await store.record({ attempts: 1, failures: 0, charsSaved: 2, charsNormalEdit: 3, charsSmartEdit: 1 });
+  const store = new LeanEditMetricsStore(process.env.METRICS_PATH!);
+  await store.record({ attempts: 1, failures: 0, charsSaved: 2, charsNormalEdit: 3, charsLeanEdit: 1 });
   send("done", { ok: true });
 }
 
