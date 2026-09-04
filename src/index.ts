@@ -12,6 +12,7 @@ import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./re
 import { resolveCanonicalPath } from "./line-utils.ts";
 import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { SnapshotStore } from "./snapshot-store.ts";
+import { observeToolResult } from "./tool-result-observer.ts";
 
 function mergeMetricsDetails(details: Record<string, any>, delta: LeanEditDelta, snapshot: LeanEditMetricsSnapshot): Record<string, any> {
   return { ...details, leanEditMetrics: { delta, snapshot } };
@@ -230,6 +231,7 @@ export default function (pi: ExtensionAPI) {
   // Product feature: session and global savings metrics are intentionally retained across runs.
   const metrics = new LeanEditMetricsStore();
   let snapshots = new SnapshotStore();
+  const ownedMutationCalls = new Set<string>();
   const recordMetrics = async (delta: LeanEditDelta): Promise<{ snapshot: LeanEditMetricsSnapshot; warning?: string }> => {
     try {
       return { snapshot: await metrics.record(delta) };
@@ -283,10 +285,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof leanEditSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
     name: "edit",
     label: "edit",
-    description: "Edit one or more non-overlapping inclusive full-line ranges previously shown by read.",
+    description: "Edit one or more non-overlapping inclusive full-line ranges previously shown by read or a complete grep result.",
     promptSnippet: "Edit full-line ranges with { path, edits: [{ startLine, endLine?, newText }] }.",
     promptGuidelines: [
-      "edit: use after read for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
+      "edit: use after read or a complete, untruncated grep result for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
       "edit: successful replacement content can be reused immediately; deletions add no replacement rows; same-count edits preserve unaffected rows, while line-count changes conservatively invalidate old suffix coverage.",
       "edit: always use edits[]; use one item for a single edit and multiple non-overlapping items for a batch; newText: \"\" deletes.",
       "edit: ranges are full lines. Use edit_huge_line for a bounded range within a huge line."
@@ -294,7 +296,8 @@ export default function (pi: ExtensionAPI) {
     parameters: leanEditSchema,
     prepareArguments: prepareLeanEditArguments,
     renderShell: "default",
-    async execute(_id, params, signal, _onUpdate, ctx) {
+    async execute(id, params, signal, _onUpdate, ctx) {
+      ownedMutationCalls.add(id);
       return executeEdit(() => leanEdit(ctx.cwd, params, snapshots, config, signal));
     },
     renderCall(args, theme, context) {
@@ -359,6 +362,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof writeTool.parameters, undefined>({
     ...writeTool,
     async execute(id, params, signal, onUpdate, ctx) {
+      ownedMutationCalls.add(id);
       const canonicalPath = await resolveCanonicalPath(ctx.cwd, params.path);
       let cleanupWarning: string | undefined;
       const result = await withInterprocessFileMutationLock(
@@ -447,8 +451,14 @@ export default function (pi: ExtensionAPI) {
   });
 
 
+  pi.on("tool_result", async (event, ctx) => {
+    if (ownedMutationCalls.delete(event.toolCallId)) return;
+    await observeToolResult(event, ctx.cwd, snapshots, ctx.signal);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     snapshots = new SnapshotStore();
+    ownedMutationCalls.clear();
     try {
       await loadExpansionSettings();
     } catch (error) {
@@ -465,10 +475,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_tree", (_event, ctx) => {
     snapshots = new SnapshotStore();
+    ownedMutationCalls.clear();
     metrics.rebuildSession(ctx.sessionManager.getBranch());
   });
 
   pi.on("session_compact", () => {
     snapshots = new SnapshotStore();
+    ownedMutationCalls.clear();
   });
 }

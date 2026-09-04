@@ -40,7 +40,7 @@ type EditRange = { startLine: number; endLine?: number; newText: string };
 { path: string; edits: EditRange[] }
 ```
 
-Applies one or more non-overlapping inclusive full-line ranges only when they match text previously shown by `read` or a failed edit and the file fingerprint still matches that read. A failed edit returns and snapshots bounded current context so it can be retried if appropriate. Successful replacement lines can be edited again immediately; deletions add no replacement rows. Same-line-count edits preserve unaffected snapshots, while line-count changes conservatively invalidate old suffix coverage. Like Pi's built-in edit, a BOM is preserved and bare CR or mixed line endings are normalized to the style of the first LF/CRLF line ending.
+Applies one or more non-overlapping inclusive full-line ranges only when they match text previously shown by `read`, a complete built-in `grep` result, or a failed edit, and the file fingerprint still matches that observation. A failed edit returns and snapshots bounded current context so it can be retried if appropriate. Successful replacement lines can be edited again immediately; deletions add no replacement rows. Same-line-count edits preserve unaffected snapshots, while line-count changes conservatively invalidate old suffix coverage. Like Pi's built-in edit, a BOM is preserved and bare CR or mixed line endings are normalized to the style of the first LF/CRLF line ending.
 
 ### `read_huge_line`
 
@@ -58,9 +58,15 @@ Reads one bounded window from a line too large for `read`, using 1-based Unicode
 
 Applies one inclusive range covered by `read_huge_line`. It supports one range per call and forbids newlines in `newText`; use normal `read`/`edit` when full-line or multiline replacement is needed. Empty text deletes the range.
 
+#### Other tool-result bookkeeping
+
+Complete, untruncated built-in `grep` results can establish full-line snapshots. The observer resolves each reported path against the grep target, rereads the UTF-8 file, verifies that every displayed line still matches exactly, and fingerprints that buffer before storing coverage. This is best-effort compatibility with the built-in grep output format; malformed output, missing files, binary/invalid UTF-8 files, image blocks, byte-truncated output, and individually truncated lines establish no snapshots. Match-limit notices do not invalidate the complete rows that were shown.
+
+`find` and `ls` return paths rather than file contents, so they do not establish snapshots. Arbitrary `bash` output is not interpreted, including shell `grep`/`find` commands. Successful `edit` or `write` results from tools other than this extension's owned mutation call clear snapshots for their target path; failed results do not.
+
 #### Snapshot visibility limitation
 
-Snapshot verification reflects this extension's own read output. It assumes other extensions do not subsequently alter or remove that output before it reaches the model; Pi currently does not expose authoritative final model-visible tool content to extensions.
+Snapshot verification assumes other extensions do not alter or remove observed `read` or `grep` output after this extension's event handler runs. Pi currently does not expose authoritative final model-visible tool content to extensions.
 
 #### Schema compatibility
 

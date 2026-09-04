@@ -193,6 +193,81 @@ test("write invalidates snapshots before a positional edit can target shifted du
   assert.equal(await fs.readFile(file, "utf8"), "y\na\na\n");
 });
 
+
+test("a complete grep result seeds a later positional edit", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "alpha\nneedle\nomega\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+  const ctx = { cwd: dir };
+
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "grep-id",
+    toolName: "grep",
+    input: { pattern: "needle", path: dir },
+    content: [{ type: "text", text: "file.txt:2: needle" }],
+    details: undefined,
+    isError: false
+  }, ctx);
+  await tools.get("edit").execute("edit-id", {
+    path: file,
+    edits: [{ startLine: 2, newText: "found" }]
+  }, undefined, undefined, ctx);
+
+  assert.equal(await fs.readFile(file, "utf8"), "alpha\nfound\nomega\n");
+});
+
+test("tool-result observation preserves owned edit seeds and invalidates external mutations", async () => {
+  const dir = await tempDir();
+  const first = path.join(dir, "first.txt");
+  const second = path.join(dir, "second.txt");
+  await fs.writeFile(first, "one\n", "utf8");
+  await fs.writeFile(second, "two\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+  const ctx = { cwd: dir };
+
+  await tools.get("read").execute("read-first", { path: first }, undefined, undefined, ctx);
+  await tools.get("read").execute("read-second", { path: second }, undefined, undefined, ctx);
+  const ownedResult = await tools.get("edit").execute("owned-edit", {
+    path: first,
+    edits: [{ startLine: 1, newText: "ONE" }]
+  }, undefined, undefined, ctx);
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "owned-edit",
+    toolName: "edit",
+    input: { path: first },
+    content: ownedResult.content,
+    details: ownedResult.details,
+    isError: false
+  }, ctx);
+  await tools.get("edit").execute("owned-edit-again", {
+    path: first,
+    edits: [{ startLine: 1, newText: "ONE AGAIN" }]
+  }, undefined, undefined, ctx);
+
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "external-edit",
+    toolName: "edit",
+    input: { path: second, edits: [{ oldText: "two", newText: "two" }] },
+    content: [{ type: "text", text: "Applied edit to second.txt" }],
+    details: { diff: "", patch: "" },
+    isError: false
+  }, ctx);
+  await assert.rejects(
+    () => tools.get("edit").execute("edit-second", {
+      path: second,
+      edits: [{ startLine: 1, newText: "TWO" }]
+    }, undefined, undefined, ctx),
+    /not read beforehand/
+  );
+  assert.equal(await fs.readFile(first, "utf8"), "ONE AGAIN\n");
+  assert.equal(await fs.readFile(second, "utf8"), "two\n");
+});
 test("tree navigation rebuilds session metrics from the active branch", async () => {
   const dir = await tempDir();
   const metricsPath = path.join(dir, "metrics.json");
