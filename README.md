@@ -86,14 +86,20 @@ Show stats:
 npm test
 ```
 
-## Configuration
+## Rendering expansion
 
-Run `/lean-edit-settings` to configure collapsed and expanded rendering. Huge-line tools share the corresponding `read` or `edit` rendering setting; `write` has its own.
+`pi-lean-edit` provides three rendering levels for each tool row, configured with `/lean-edit-settings`:
 
-- `minimal`: compact rendering
-- `medium`: detailed rendering capped at 20 rendered lines
-- `full`: fully detailed rendering
+- `minimal`: use the tool's compact/collapsed renderer
+- `medium`: use detailed/expanded rendering, capped at 20 rendered lines
+- `full`: use detailed/expanded rendering without the extension's line cap
+
+Collapsed and expanded tool rows are configured independently. This allows, for example, an expanded `edit` row to show its full diff while an expanded `read` row remains compact. Huge-line tools share the corresponding `read` or `edit` setting; `write` has its own.
 
 Collapsed defaults are all `minimal`. Expanded defaults are `read=minimal`, `edit=full`, and `write=medium`. Settings persist under the configured Pi agent directory in `pi-lean-edit/settings.json`.
 
-Read output is capped by line, byte, and huge-line column limits. Defaults: `PI_LEAN_EDIT_MAX_READ_LINES=2000`, `PI_LEAN_EDIT_MAX_READ_BYTES=50000`, and `PI_LEAN_EDIT_MAX_READ_COLUMNS=400`.
+## Configuration
+
+Read content is capped by line, byte, and huge-line column limits. Defaults: `PI_LEAN_EDIT_MAX_READ_LINES=2000`, `PI_LEAN_EDIT_MAX_READ_BYTES=50000`, and `PI_LEAN_EDIT_MAX_READ_COLUMNS=400`. Override values must be positive integers.
+
+These limits apply to the displayed file-content payload (numbered lines or a huge-line column window). Summary text and continuation guidance are added outside that budget, so the complete tool result can be slightly larger.
