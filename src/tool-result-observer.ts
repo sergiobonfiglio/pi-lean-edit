@@ -1,27 +1,35 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+  isBashToolResult,
   isEditToolResult,
   isGrepToolResult,
   isWriteToolResult,
   type ToolResultEvent
 } from "@earendil-works/pi-coding-agent";
-import { decodeUtf8, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
 import type { SnapshotStore } from "./snapshot-store.ts";
 
-type ParsedFile = {
-  lines: string[];
-};
-
-type GrepMarker = {
+type OutputMarker = {
   displayPath: string;
   line: number;
   text: string;
 };
 
-function markerCandidates(row: string): GrepMarker[] {
-  const candidates: GrepMarker[] = [];
-  for (const expression of [/:(\d+): /g, /-(\d+)- /g]) {
+type PathMetadata = {
+  path: string;
+  isDirectory: boolean;
+  isFile: boolean;
+};
+
+type ResolvedRow = {
+  path: string;
+  line: number;
+  text: string;
+};
+
+function markerCandidates(row: string): OutputMarker[] {
+  const candidates: OutputMarker[] = [];
+  for (const expression of [/:(\d+):/g, /-(\d+)-/g]) {
     for (const match of row.matchAll(expression)) {
       const line = Number(match[1]);
       const displayPath = row.slice(0, match.index);
@@ -37,107 +45,118 @@ function isWithin(root: string, candidate: string): boolean {
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-async function readTextFile(filePath: string, signal?: AbortSignal): Promise<ParsedFile | undefined> {
-  try {
-    const buffer = await fs.readFile(filePath, { signal });
-    if (isBinary(buffer)) return undefined;
-    return { lines: splitText(decodeUtf8(buffer)).lines };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).name === "AbortError") throw error;
-    return undefined;
-  }
+function textContent(event: ToolResultEvent): string {
+  return event.content
+    .filter((item): item is { type: "text"; text: string } => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
 }
 
-function setLineSnapshots(store: SnapshotStore, filePath: string, parsed: ParsedFile, lineNumbers: number[]): void {
-  const sorted = [...new Set(lineNumbers)].sort((a, b) => a - b);
-  if (sorted.length === 0) return;
-  let start = sorted[0]!;
-  let end = start;
+function grepOutput(event: ToolResultEvent): string {
+  const text = textContent(event);
+  const footerStart = text.indexOf("\n\n[");
+  return footerStart === -1 ? text : text.slice(0, footerStart);
+}
 
-  const flush = () => {
-    store.set({ path: filePath, startLine: start, endLine: end, lines: parsed.lines.slice(start - 1, end) });
-  };
-
-  for (const line of sorted.slice(1)) {
-    if (line === end + 1) {
-      end = line;
-      continue;
+function createMetadataResolver() {
+  const cache = new Map<string, Promise<PathMetadata | undefined>>();
+  return (base: string, displayPath: string): Promise<PathMetadata | undefined> => {
+    const resolved = path.isAbsolute(displayPath) ? path.normalize(displayPath) : path.resolve(base, displayPath);
+    let pending = cache.get(resolved);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const canonical = await fs.realpath(resolved);
+          const stat = await fs.stat(canonical);
+          return { path: canonical, isDirectory: stat.isDirectory(), isFile: stat.isFile() };
+        } catch {
+          return undefined;
+        }
+      })();
+      cache.set(resolved, pending);
     }
-    flush();
-    start = line;
-    end = line;
+    return pending;
+  };
+}
+
+async function stageRows(
+  rows: string[],
+  resolveMarker: (marker: OutputMarker) => Promise<ResolvedRow | undefined>,
+  signal?: AbortSignal
+): Promise<ResolvedRow[]> {
+  const staged: ResolvedRow[] = [];
+  for (const row of rows) {
+    const matches = new Map<string, ResolvedRow>();
+    for (const marker of markerCandidates(row)) {
+      const resolved = await resolveMarker(marker);
+      signal?.throwIfAborted();
+      if (!resolved) continue;
+      matches.set(`${resolved.path}\0${resolved.line}\0${resolved.text}`, resolved);
+    }
+    if (matches.size === 1) staged.push([...matches.values()][0]!);
   }
-  flush();
+  return staged;
+}
+
+function commitRows(store: SnapshotStore, revision: number, rows: ResolvedRow[]): void {
+  if (store.revision() !== revision) return;
+  for (const row of rows) {
+    store.set({ path: row.path, startLine: row.line, endLine: row.line, lines: [row.text] });
+  }
 }
 
 async function observeGrep(event: ToolResultEvent, cwd: string, store: SnapshotStore, signal?: AbortSignal): Promise<void> {
   if (!isGrepToolResult(event) || event.isError) return;
-  if (event.details?.linesTruncated || event.details?.truncation?.truncated) return;
   if (event.content.some((item) => item.type === "image")) return;
+
+  const rows = grepOutput(event).split("\n").filter((row) => row.length > 0);
+  if (rows.length === 0 || rows[0] === "No matches found") return;
   const invocationRevision = store.revision();
-
-  const text = event.content
-    .filter((item): item is { type: "text"; text: string } => item.type === "text")
-    .map((item) => item.text)
-    .join("\n");
-  const rows = text.split("\n");
-  const footerStart = rows.indexOf("");
-  const outputRows = (footerStart === -1 ? rows : rows.slice(0, footerStart)).filter((row) => row.length > 0);
-  if (outputRows.length === 0 || outputRows[0] === "No matches found") return;
-
+  const metadata = createMetadataResolver();
   const rawSearchPath = typeof event.input.path === "string" && event.input.path ? event.input.path : ".";
-  const searchPath = await resolveCanonicalPath(cwd, rawSearchPath);
+  const search = await metadata(cwd, rawSearchPath);
   signal?.throwIfAborted();
+  if (!search || (!search.isDirectory && !search.isFile)) return;
 
-  let searchIsDirectory: boolean;
-  try {
-    searchIsDirectory = (await fs.stat(searchPath)).isDirectory();
-  } catch {
-    return;
-  }
+  const staged = await stageRows(rows, async (marker) => {
+    // Pi's built-in grep inserts one formatting space after its marker.
+    if (!marker.text.startsWith(" ")) return undefined;
+    const text = marker.text.slice(1);
+    if (event.details?.linesTruncated && text.endsWith("... [truncated]")) return undefined;
 
-  const files = new Map<string, Promise<ParsedFile | undefined>>();
-  const observed = new Map<string, { parsed: ParsedFile; lines: number[] }>();
-  const getFile = (filePath: string) => {
-    let pending = files.get(filePath);
-    if (!pending) {
-      pending = readTextFile(filePath, signal);
-      files.set(filePath, pending);
-    }
-    return pending;
-  };
-
-  for (const row of outputRows) {
-    const matches = new Map<string, { path: string; line: number; parsed: ParsedFile }>();
-    for (const marker of markerCandidates(row)) {
-      let filePath: string;
-      if (searchIsDirectory) {
-        const resolved = path.resolve(searchPath, marker.displayPath);
-        if (!isWithin(searchPath, resolved)) continue;
-        filePath = await resolveCanonicalPath(searchPath, marker.displayPath);
-        if (!isWithin(searchPath, filePath)) continue;
-      } else {
-        if (marker.displayPath !== path.basename(searchPath)) continue;
-        filePath = searchPath;
-      }
-
-      const parsed = await getFile(filePath);
-      if (!parsed || parsed.lines[marker.line - 1] !== marker.text) continue;
-      matches.set(`${filePath}\0${marker.line}`, { path: filePath, line: marker.line, parsed });
+    if (search.isFile) {
+      if (marker.displayPath !== path.basename(search.path)) return undefined;
+      return { path: search.path, line: marker.line, text };
     }
 
-    if (matches.size !== 1) return;
-    const match = [...matches.values()][0]!;
-    const existing = observed.get(match.path);
-    if (existing) existing.lines.push(match.line);
-    else observed.set(match.path, { parsed: match.parsed, lines: [match.line] });
-  }
+    const lexicalPath = path.resolve(search.path, marker.displayPath);
+    if (!isWithin(search.path, lexicalPath)) return undefined;
+    const candidate = await metadata(search.path, marker.displayPath);
+    if (!candidate?.isFile || !isWithin(search.path, candidate.path)) return undefined;
+    return { path: candidate.path, line: marker.line, text };
+  }, signal);
 
   signal?.throwIfAborted();
-  if (store.revision() !== invocationRevision) return;
-  for (const [filePath, observation] of observed) {
-    setLineSnapshots(store, filePath, observation.parsed, observation.lines);
-  }
+  commitRows(store, invocationRevision, staged);
+}
+
+async function observeBash(event: ToolResultEvent, cwd: string, store: SnapshotStore, signal?: AbortSignal): Promise<void> {
+  if (!isBashToolResult(event) || event.isError) return;
+  const truncation = event.details?.truncation;
+  const output = truncation?.truncated ? truncation.content : textContent(event);
+  const rows = output.split("\n");
+  if (truncation?.lastLinePartial) rows.shift();
+  const invocationRevision = store.revision();
+  const metadata = createMetadataResolver();
+
+  const staged = await stageRows(rows, async (marker) => {
+    const candidate = await metadata(cwd, marker.displayPath);
+    if (!candidate?.isFile) return undefined;
+    return { path: candidate.path, line: marker.line, text: marker.text };
+  }, signal);
+
+  signal?.throwIfAborted();
+  commitRows(store, invocationRevision, staged);
 }
 
 export async function observeToolResult(event: ToolResultEvent, cwd: string, store: SnapshotStore, signal?: AbortSignal): Promise<void> {
@@ -146,11 +165,14 @@ export async function observeToolResult(event: ToolResultEvent, cwd: string, sto
   if (isEditToolResult(event) || isWriteToolResult(event)) {
     const rawPath = typeof event.input.path === "string" ? event.input.path : undefined;
     if (!rawPath) return;
-    store.clear(await resolveCanonicalPath(cwd, rawPath));
+    const metadata = createMetadataResolver();
+    const target = await metadata(cwd, rawPath);
+    store.clear(target?.path ?? (path.isAbsolute(rawPath) ? path.normalize(rawPath) : path.resolve(cwd, rawPath)));
     return;
   }
 
-  await observeGrep(event, cwd, store, signal);
+  if (isBashToolResult(event)) await observeBash(event, cwd, store, signal);
+  else await observeGrep(event, cwd, store, signal);
 }
 
 export const toolResultObserverInternals = { markerCandidates };

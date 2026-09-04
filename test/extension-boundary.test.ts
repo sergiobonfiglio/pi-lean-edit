@@ -219,6 +219,91 @@ test("a complete grep result seeds a later positional edit", async () => {
   assert.equal(await fs.readFile(file, "utf8"), "alpha\nfound\nomega\n");
 });
 
+test("bash output seeds a later positional edit without an owned read", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "alpha\nneedle\nomega\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+  const ctx = { cwd: dir };
+
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "bash-id",
+    toolName: "bash",
+    input: { command: "rg -n needle file.txt" },
+    content: [{ type: "text", text: "file.txt:2:needle" }],
+    details: undefined,
+    isError: false
+  }, ctx);
+  await tools.get("edit").execute("edit-id", {
+    path: file,
+    edits: [{ startLine: 2, newText: "found" }]
+  }, undefined, undefined, ctx);
+
+  assert.equal(await fs.readFile(file, "utf8"), "alpha\nfound\nomega\n");
+});
+
+test("incorrect bash text produces the normal stale response without mutation", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "actual\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+  const ctx = { cwd: dir };
+
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "bash-id",
+    toolName: "bash",
+    input: { command: "compiler" },
+    content: [{ type: "text", text: "file.txt:1:reported" }],
+    details: undefined,
+    isError: false
+  }, ctx);
+  await assert.rejects(
+    () => tools.get("edit").execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "changed" }] }, undefined, undefined, ctx),
+    /requested text changed since it was read/
+  );
+  assert.equal(await fs.readFile(file, "utf8"), "actual\n");
+});
+
+test("complete rows retained by truncated bash output can seed an edit", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "before\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+  const ctx = { cwd: dir };
+  const retained = "file.txt:1:before";
+
+  await events.get("tool_result")!({
+    type: "tool_result",
+    toolCallId: "bash-id",
+    toolName: "bash",
+    input: { command: "anything" },
+    content: [{ type: "text", text: `${retained}\n\n[Showing lines 10-10 of 10. Full output: /tmp/full]` }],
+    details: {
+      truncation: {
+        content: retained,
+        truncated: true,
+        truncatedBy: "lines",
+        totalLines: 10,
+        totalBytes: 100,
+        outputLines: 1,
+        outputBytes: retained.length,
+        lastLinePartial: false,
+        firstLineExceedsLimit: false,
+        maxLines: 1,
+        maxBytes: 50_000
+      },
+      fullOutputPath: "/tmp/full"
+    },
+    isError: false
+  }, ctx);
+  await tools.get("edit").execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "after" }] }, undefined, undefined, ctx);
+  assert.equal(await fs.readFile(file, "utf8"), "after\n");
+});
 test("tool-result observation preserves owned edit seeds and invalidates external mutations", async () => {
   const dir = await tempDir();
   const first = path.join(dir, "first.txt");

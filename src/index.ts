@@ -284,10 +284,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof leanEditSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
     name: "edit",
     label: "edit",
-    description: "Edit one or more non-overlapping inclusive full-line ranges previously shown by read or a complete grep result.",
+    description: "Edit one or more non-overlapping inclusive full-line ranges previously shown by read or grep-compatible grep/bash output.",
     promptSnippet: "Edit full-line ranges with { path, edits: [{ startLine, endLine?, newText }] }.",
     promptGuidelines: [
-      "edit: use after read or a complete, untruncated grep result for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
+      "edit: use after read or complete grep-compatible grep/bash output for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
       "edit: successful replacement content can be reused immediately; deletions add no replacement rows; same-count edits preserve unaffected rows, while line-count changes conservatively invalidate old suffix coverage.",
       "edit: always use edits[]; use one item for a single edit and multiple non-overlapping items for a batch; newText: \"\" deletes.",
       "edit: ranges are full lines. Use edit_huge_line for a bounded range within a huge line."
