@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { resolveCanonicalPath } from "./line-utils.ts";
 export type LeanEditCounters = {
   attempts: number;
@@ -129,12 +128,12 @@ export class LeanEditMetricsStore {
     add(this.sessionCounters, delta);
     const operation = this.writeQueue.then(async () => {
       const canonicalPath = await resolveCanonicalPath(process.cwd(), this.metricsPath);
-      this.globalCounters = await withInterprocessFileMutationLock(canonicalPath, () => withFileMutationQueue(canonicalPath, async () => {
+      this.globalCounters = await withFileMutationQueue(canonicalPath, async () => {
         const totals = await readCounters(canonicalPath);
         add(totals, delta);
         await writeCounters(canonicalPath, totals);
         return totals;
-      }));
+      });
     });
     this.writeQueue = operation.catch(() => undefined);
     await operation;

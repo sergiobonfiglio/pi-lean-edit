@@ -143,6 +143,13 @@ test("file changed after read returns current text and refreshes snapshot", asyn
   await expectFile(session, "a\nx\n");
 });
 
+test("unrelated file mutations do not block an edit whose target still matches", async () => {
+  const session = await createSession("a\nb\nc\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  await fs.writeFile(session.file, "A\nb\nC\n", "utf8");
+  await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, session.store);
+  await expectFile(session, "A\nB\nC\n");
+});
 test("stale refresh does not snapshot text beyond automatic output limits", async () => {
   const session = await createSession("before\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
@@ -166,17 +173,15 @@ test("concurrent stale edits cannot consume each other's refreshed snapshot", as
   await expectFile(session, "external\n");
 });
 
-test("same-process initially valid concurrent edits do not lose updates", async () => {
+test("same-process valid concurrent edits are serialized without losing updates", async () => {
   const session = await createSession("one\ntwo\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
   const results = await Promise.allSettled([
     leanEdit(session.dir, { path: session.file, startLine: 1, newText: "ONE" }, session.store),
     leanEdit(session.dir, { path: session.file, startLine: 2, newText: "TWO" }, session.store)
   ]);
-  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-  assert.ok(results.some((result) => result.status === "rejected" && /snapshot changed while edit was queued/.test(String(result.reason))));
-  const content = await fs.readFile(session.file, "utf8");
-  assert.ok(content === "ONE\ntwo\n" || content === "one\nTWO\n");
+  assert.ok(results.every((result) => result.status === "fulfilled"));
+  await expectFile(session, "ONE\nTWO\n");
 });
 
 test("duplicate text edits only requested range", async () => {
@@ -462,16 +467,15 @@ test("external mutation of freshly seeded text is stale and refreshes it", async
   assert.equal(error.refreshedText, "1 │ external");
 });
 
-test("a fingerprint rejects shifted duplicate text from another session", async () => {
+test("identical text at requested coordinates remains editable after another session changes the file", async () => {
   const session = await createSession("x\na\n");
   const otherStore = new SnapshotStore();
   await leanRead(session.dir, { path: session.file }, config, session.store);
   await leanRead(session.dir, { path: session.file }, config, otherStore);
   await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "y\na" }, session.store);
 
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, otherStore));
-  assert.match(error.message, /changed since it was read/);
-  await expectFile(session, "y\na\na\n");
+  await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, otherStore);
+  await expectFile(session, "y\nB\na\n");
 });
 
 test("net-zero batches still invalidate old suffix coverage and reseed later outputs", async () => {

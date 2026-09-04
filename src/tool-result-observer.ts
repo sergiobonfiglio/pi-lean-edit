@@ -6,11 +6,10 @@ import {
   isWriteToolResult,
   type ToolResultEvent
 } from "@earendil-works/pi-coding-agent";
-import { decodeUtf8, fingerprintBytes, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
+import { decodeUtf8, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
 import type { SnapshotStore } from "./snapshot-store.ts";
 
 type ParsedFile = {
-  fingerprint: string;
   lines: string[];
 };
 
@@ -42,7 +41,7 @@ async function readTextFile(filePath: string, signal?: AbortSignal): Promise<Par
   try {
     const buffer = await fs.readFile(filePath, { signal });
     if (isBinary(buffer)) return undefined;
-    return { fingerprint: fingerprintBytes(buffer), lines: splitText(decodeUtf8(buffer)).lines };
+    return { lines: splitText(decodeUtf8(buffer)).lines };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).name === "AbortError") throw error;
     return undefined;
@@ -50,7 +49,6 @@ async function readTextFile(filePath: string, signal?: AbortSignal): Promise<Par
 }
 
 function setLineSnapshots(store: SnapshotStore, filePath: string, parsed: ParsedFile, lineNumbers: number[]): void {
-  store.observeFile(filePath, parsed.fingerprint);
   const sorted = [...new Set(lineNumbers)].sort((a, b) => a - b);
   if (sorted.length === 0) return;
   let start = sorted[0]!;

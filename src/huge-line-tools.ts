@@ -3,8 +3,7 @@ import { Type, type Static } from "typebox";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { boundedLineDiff } from "./diff.ts";
 import { StaleEditError, type LeanEditConfig, type LeanEditResult } from "./edit-tool.ts";
-import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
-import { codePointLength, decodeUtf8, fingerprintBytes, formatColumnLine, isBinary, joinText, replaceColumns, resolveCanonicalPath, sliceColumns, splitText } from "./line-utils.ts";
+import { codePointLength, decodeUtf8, formatColumnLine, isBinary, joinText, replaceColumns, resolveCanonicalPath, sliceColumns, splitText } from "./line-utils.ts";
 import type { LeanReadConfig, LeanReadResult } from "./read-tool.ts";
 import { SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 
@@ -59,10 +58,10 @@ function fitColumnWindow(lineNumber: number, line: string, startColumn: number, 
   return { endColumn, text: selected.join(""), lineLength };
 }
 
-async function readTextFile(path: string, signal?: AbortSignal): Promise<{ text: string; bytes: number; fingerprint: string }> {
+async function readTextFile(path: string, signal?: AbortSignal): Promise<{ text: string; bytes: number }> {
   const buffer = await fs.readFile(path, { signal });
   if (isBinary(buffer)) throw new Error("huge-line tools support text files only");
-  return { text: decodeUtf8(buffer), bytes: buffer.length, fingerprint: fingerprintBytes(buffer) };
+  return { text: decodeUtf8(buffer), bytes: buffer.length };
 }
 
 export async function leanReadHugeLine(
@@ -75,8 +74,7 @@ export async function leanReadHugeLine(
   signal?.throwIfAborted();
   const full = await resolveCanonicalPath(cwd, input.path);
   signal?.throwIfAborted();
-  const { text, bytes, fingerprint } = await readTextFile(full, signal);
-  store.observeFile(full, fingerprint);
+  const { text, bytes } = await readTextFile(full, signal);
   const parsed = splitText(text);
   const lineNumber = positiveInteger(input.line, 1, "line");
   const line = parsed.lines[lineNumber - 1];
@@ -156,19 +154,13 @@ export async function leanEditHugeLine(
 ): Promise<LeanEditResult> {
   signal?.throwIfAborted();
   validateHugeEdit(input);
-  const invocationRevision = store.revision();
   const full = await resolveCanonicalPath(cwd, input.path);
   signal?.throwIfAborted();
-  if (store.revision(full) > invocationRevision) throw new Error("file stale, read again: snapshot changed while edit was starting");
   const initialSnapshot = store.coveredColumns(full, input.line, input.startColumn, input.endColumn);
-  const initialFingerprint = store.fingerprint(full);
-  const initialRevision = store.revision(full);
-  let cleanupWarning: string | undefined;
 
-  const result = await withInterprocessFileMutationLock(full, () => withFileMutationQueue(full, async () => {
+  return withFileMutationQueue(full, async () => {
     signal?.throwIfAborted();
-    if (store.revision(full) !== initialRevision) throw new Error("file stale, read again: snapshot changed while edit was queued");
-    const { text: before, fingerprint: currentFingerprint } = await readTextFile(full, signal);
+    const { text: before } = await readTextFile(full, signal);
     signal?.throwIfAborted();
     const parsed = splitText(before);
     const line = parsed.lines[input.line - 1];
@@ -182,9 +174,7 @@ export async function leanEditHugeLine(
       input.endColumn - initialSnapshot.startColumn + 1
     );
 
-    const fileChanged = initialFingerprint != null && initialFingerprint !== currentFingerprint;
-    if (!initialSnapshot || expected !== actual || fileChanged) {
-      store.observeFile(full, currentFingerprint);
+    if (!initialSnapshot || expected !== actual) {
       const maxColumns = positiveInteger(config.maxColumns, 400, "maxColumns");
       const refreshed = formatColumnLine(input.line, input.startColumn, input.endColumn, actual);
       if (input.endColumn - input.startColumn + 1 > maxColumns || Buffer.byteLength(refreshed, "utf8") > config.maxBytes) {
@@ -198,7 +188,7 @@ export async function leanEditHugeLine(
         text: actual,
         lineLength: codePointLength(line)
       });
-      throw new StaleEditError(refreshed, !initialSnapshot ? "the requested range was not read beforehand" : fileChanged ? "the file changed since it was read" : "the requested text changed since it was read");
+      throw new StaleEditError(refreshed, !initialSnapshot ? "the requested range was not read beforehand" : "the requested text changed since it was read");
     }
 
     const nextLines = [...parsed.lines];
@@ -208,7 +198,6 @@ export async function leanEditHugeLine(
     signal?.throwIfAborted();
     // Deliberately matches Pi's built-in edit/write behavior: overwrite in place rather than adding rename semantics.
     await fs.writeFile(full, after, "utf8");
-    store.updateFingerprint(full, fingerprintBytes(Buffer.from(after, "utf8")));
     store.invalidateRanges(full, [{ startLine: input.line, endLine: input.line }]);
     const replacementLength = codePointLength(input.newText);
     if (replacementLength > 0) {
@@ -228,12 +217,5 @@ export async function leanEditHugeLine(
       firstChangedLine: line === nextLine ? undefined : input.line,
       delta: hugeEditDelta(actual, input)
     };
-  }), {
-    signal,
-    onCleanupError: (error) => {
-      cleanupWarning = `Warning: Edit was applied, but the file lock could not be released cleanly: ${error instanceof Error ? error.message : String(error)}. Do not retry the edit blindly.`;
-    }
   });
-
-  return cleanupWarning ? { ...result, warning: cleanupWarning } : result;
 }

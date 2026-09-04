@@ -13,7 +13,8 @@
   "files": [
     "index.ts",
     "src",
-    "README.md"
+    "README.md",
+    "DESIGN.md"
   ],
   "repository": {
     "type": "git",
@@ -41,12 +42,10 @@
     "typebox": "*"
   },
   "dependencies": {
-    "diff": "^8.0.3",
-    "proper-lockfile": "^4.1.2"
+    "diff": "^8.0.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.0.0"
   }
 }

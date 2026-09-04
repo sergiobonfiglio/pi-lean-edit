@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,9 +39,6 @@ export function decodeUtf8(buf: Buffer): string {
   }
 }
 
-export function fingerprintBytes(buf: Uint8Array): string {
-  return createHash("sha256").update(buf).digest("hex");
-}
 
 export function splitText(text: string): SplitText {
   const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";

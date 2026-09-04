@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { formatDimensionNote, resizeImage } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { decodeUtf8, fingerprintBytes, formatNumberedLines, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
+import { decodeUtf8, formatNumberedLines, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
 import { SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 
 export const leanReadSchema = Type.Object({
@@ -187,7 +187,6 @@ export async function leanRead(
   if (isBinary(buf)) throw new Error("lean read supports text only, except supported images");
 
   const text = decodeUtf8(buf);
-  store.observeFile(full, fingerprintBytes(buf));
   const parsed = splitText(text);
   const startLine = positiveInteger(input.offset, 1, "offset");
   const requestedLimit = positiveInteger(input.limit, config.maxLines, "limit");

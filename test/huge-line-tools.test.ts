@@ -75,6 +75,14 @@ test("edit_huge_line detects stale text and reseeds authored replacement", async
   assert.match(await fs.readFile(s.file, "utf8"), /^01234🙂89/);
 });
 
+test("huge-line edits ignore unrelated mutations when requested columns still match", async () => {
+  const original = "0123456789".repeat(10);
+  const s = await session(`before\n${original}\n`);
+  await leanReadHugeLine(s.dir, { path: s.file, line: 2, columnOffset: 5, columnLimit: 6 }, config, s.store);
+  await fs.writeFile(s.file, `changed\n${original}\n`, "utf8");
+  await leanEditHugeLine(s.dir, { path: s.file, line: 2, startColumn: 6, endColumn: 8, newText: "XYZ" }, s.store, config);
+  assert.equal(await fs.readFile(s.file, "utf8"), `changed\n${original.slice(0, 5)}XYZ${original.slice(8)}\n`);
+});
 test("edit_huge_line forbids newlines and preserves CRLF", async () => {
   const s = await session(`${"abcdef".repeat(20)}\r\nnext\r\n`);
   await leanReadHugeLine(s.dir, { path: s.file, line: 1, columnOffset: 2, columnLimit: 4 }, config, s.store);
@@ -87,15 +95,15 @@ test("edit_huge_line forbids newlines and preserves CRLF", async () => {
   assert.match(await fs.readFile(s.file, "utf8"), /\r\nnext\r\n$/);
 });
 
-test("concurrent huge-line edits cannot consume each other's snapshots", async () => {
+test("same-process disjoint huge-line edits are serialized without losing updates", async () => {
   const s = await session(`${"0123456789".repeat(10)}\n`);
   await leanReadHugeLine(s.dir, { path: s.file, line: 1, columnOffset: 2, columnLimit: 6 }, config, s.store);
   const results = await Promise.allSettled([
     leanEditHugeLine(s.dir, { path: s.file, line: 1, startColumn: 2, endColumn: 3, newText: "AA" }, s.store, config),
     leanEditHugeLine(s.dir, { path: s.file, line: 1, startColumn: 5, endColumn: 6, newText: "BB" }, s.store, config)
   ]);
-  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-  assert.ok(results.some((result) => result.status === "rejected" && /snapshot changed while edit was queued/.test(String(result.reason))));
+  assert.ok(results.every((result) => result.status === "fulfilled"));
+  assert.match(await fs.readFile(s.file, "utf8"), /^0AA3BB6789/);
 });
 
 test("read_huge_line keeps the rendered window within byte and column limits", async () => {

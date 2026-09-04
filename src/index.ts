@@ -10,7 +10,6 @@ import { diffStat } from "./diff.ts";
 import { renderDiffForLeanEdit } from "./diff-render.ts";
 import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./render-expansion.ts";
 import { resolveCanonicalPath } from "./line-utils.ts";
-import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { SnapshotStore } from "./snapshot-store.ts";
 import { observeToolResult } from "./tool-result-observer.ts";
 
@@ -245,7 +244,7 @@ export default function (pi: ExtensionAPI) {
       const result = await run();
       const { snapshot, warning } = await recordMetrics(result.delta);
       return {
-        content: [{ type: "text" as const, text: [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n") }],
+        content: [{ type: "text" as const, text: [result.text, statsLine(snapshot), warning].filter(Boolean).join("\n") }],
         details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
       };
     } catch (error) {
@@ -364,22 +363,8 @@ export default function (pi: ExtensionAPI) {
     async execute(id, params, signal, onUpdate, ctx) {
       ownedMutationCalls.add(id);
       const canonicalPath = await resolveCanonicalPath(ctx.cwd, params.path);
-      let cleanupWarning: string | undefined;
-      const result = await withInterprocessFileMutationLock(
-        canonicalPath,
-        () => createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx),
-        {
-          signal,
-          onCleanupError: (error) => {
-            cleanupWarning = `Warning: Write was applied, but the file lock could not be released cleanly: ${error instanceof Error ? error.message : String(error)}. Do not retry blindly.`;
-          }
-        }
-      );
+      const result = await createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
       snapshots.clear(canonicalPath);
-      if (cleanupWarning) {
-        const text = result.content.find((item) => item.type === "text");
-        if (text?.type === "text") text.text += `\n${cleanupWarning}`;
-      }
       return result;
     },
     renderCall(args, theme, context) {

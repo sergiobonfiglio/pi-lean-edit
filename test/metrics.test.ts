@@ -52,6 +52,20 @@ test("global metrics persist across extension reload", async () => {
   assert.equal(snapshot.global.charsSaved, 4);
 });
 
+test("same-process concurrent metric updates do not lose increments", async () => {
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
+  const store = new LeanEditMetricsStore(metricsPath);
+  await store.loadGlobal();
+  const delta = { attempts: 1, failures: 0, charsNormalEdit: 3, charsLeanEdit: 1, charsSaved: 2 };
+  await Promise.all(Array.from({ length: 5 }, () => store.record(delta)));
+  assert.deepEqual(JSON.parse(await fs.readFile(metricsPath, "utf8")), {
+    attempts: 5,
+    failures: 0,
+    charsSaved: 10,
+    charsNormalEdit: 15,
+    charsLeanEdit: 5
+  });
+});
 test("session metrics rebuild from tool result details", async () => {
   const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const store = new LeanEditMetricsStore(metricsPath);

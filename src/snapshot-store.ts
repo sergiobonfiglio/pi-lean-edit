@@ -21,7 +21,6 @@ type ColumnSnapshotSegment = Omit<ColumnSnapshot, "path">;
 
 type FileMemory = {
   revision: number;
-  fingerprint?: string;
   segments: SnapshotSegment[];
   columnSegments: ColumnSnapshotSegment[];
 };
@@ -104,36 +103,12 @@ export class SnapshotStore {
     return path == null ? this.nextRevision : this.files.get(path)?.revision ?? 0;
   }
 
-  fingerprint(path: string): string | undefined {
-    return this.files.get(path)?.fingerprint;
-  }
-
-  observeFile(path: string, fingerprint: string): void {
-    const memory = this.files.get(path);
-    if (!memory) {
-      this.files.set(path, { revision: 0, fingerprint, segments: [], columnSegments: [] });
-      return;
-    }
-    if (memory.fingerprint === fingerprint) return;
-    memory.fingerprint = fingerprint;
-    memory.segments = [];
-    memory.columnSegments = [];
-    memory.revision = ++this.nextRevision;
-  }
-
-  updateFingerprint(path: string, fingerprint: string): void {
-    const memory = this.files.get(path) ?? { revision: 0, segments: [], columnSegments: [] };
-    memory.fingerprint = fingerprint;
-    this.files.set(path, memory);
-  }
-
   clear(path: string): void {
-    const memory = this.files.get(path);
-    if (!memory) return;
-    memory.fingerprint = undefined;
+    const memory = this.files.get(path) ?? { revision: 0, segments: [], columnSegments: [] };
     memory.segments = [];
     memory.columnSegments = [];
     memory.revision = ++this.nextRevision;
+    this.files.set(path, memory);
   }
 
   set(snapshot: FileSnapshot): void {
