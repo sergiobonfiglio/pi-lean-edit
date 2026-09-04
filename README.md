@@ -36,17 +36,26 @@ Only `path` is required. For normal reads, use `path` alone or `offset`/`limit` 
 ### `edit`
 
 ```ts
-type LineRange = { startLine: number; endLine?: number; newText: string };
-type ColumnRange = { startLine: number; startColumn: number; endColumn: number; newText: string };
+type EditRange = {
+  startLine: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+  newText: string;
+};
 
-LineRange & { path: string }
-// or
-ColumnRange & { path: string }
-// or either range shape in a batch
-{ path: string; edits: Array<LineRange | ColumnRange> }
+{ path: string; edits: EditRange[] }
 ```
 
-`edit` applies one or more non-overlapping inclusive ranges only when the requested text matches text previously shown by `read` or a failed edit. Column ranges must stay within one source line, but their replacement text may contain newlines. If a range was not read or its text changed, the edit is not applied; for line-range edits, the error returns and snapshots the current target with up to five surrounding lines on each side so the same or a nearby corrected edit can be retried. Text beyond the configured automatic output limits still requires `read`. Normal-line column reads show the whole line; huge-line column reads can cover matching column ranges. After a successful edit, edited text must be read again before reuse. Line-count-preserving edits keep unaffected later reads valid; line-count-changing edits invalidate them.
+Use one `edits` item for a single edit or multiple items for a batch. A line range uses `startLine` with optional `endLine` and omits columns. A column range uses `startLine`, `startColumn`, and `endColumn` and omits `endLine`. Direct single-range inputs from older sessions are normalized to `edits` before validation.
+
+`edit` applies one or more non-overlapping inclusive ranges only when the requested text matches text previously shown by `read` or a failed edit. Column ranges must stay within one source line, but their replacement text may contain newlines. Cross-field constraints are checked at runtime so the provider-facing schema remains compatible with APIs that reject JSON Schema unions. If a range was not read or its text changed, the edit is not applied; for line-range edits, the error returns and snapshots the current target with up to five surrounding lines on each side so the same or a nearby corrected edit can be retried. Text beyond the configured automatic output limits still requires `read`. Normal-line column reads show the whole line; huge-line column reads can cover matching column ranges. After a successful edit, edited text must be read again before reuse. Line-count-preserving edits keep unaffected later reads valid; line-count-changing edits invalidate them.
+
+#### Schema compatibility
+
+Keep the provider-facing `edit` schema as a plain object and do not model its alternative forms with `Type.Union` or top-level `anyOf`, `oneOf`, or `allOf`. Amazon Bedrock Converse rejects such schemas before inference with `input_schema does not support oneOf, allOf, or anyOf at the top level`; other providers and strict-tool implementations also support different JSON Schema subsets.
+
+The canonical `path + edits[]` shape therefore favors transport compatibility over expressing every cross-field rule in JSON Schema. `normalizeEdits()` remains the source of truth for paired columns, mutually exclusive line/column fields, non-overlapping ranges, and other runtime invariants. `prepareArguments` preserves direct single-range calls from older sessions. The schema tests recursively reject composition keywords so this constraint is not accidentally reintroduced.
 
 ## Concurrency
 

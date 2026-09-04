@@ -46,9 +46,11 @@ test("registered edit execute throws with stale guidance and recorded metrics", 
   await fs.writeFile(file, "before\n", "utf8");
   const tools = registerTools(metricsPath);
   const editTool = tools.get("edit");
+  const prepared = editTool.prepareArguments({ path: file, startLine: 1, newText: "after" });
+  assert.deepEqual(prepared, { path: file, edits: [{ startLine: 1, newText: "after" }] });
 
   await assert.rejects(
-    () => editTool.execute("edit-id", { path: file, startLine: 1, newText: "after" }, undefined, undefined, { cwd: dir }),
+    () => editTool.execute("edit-id", prepared, undefined, undefined, { cwd: dir }),
     (error: any) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /edit not applied: one or more requested ranges were not read beforehand\./);

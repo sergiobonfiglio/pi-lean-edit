@@ -7,39 +7,62 @@ import { codePointLength, formatColumnLine, formatNumberedLines, joinText, range
 import { type ColumnSnapshot, type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 import { type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 
-const lineEditRangeSchema = Type.Object({
+export type LineEditRange = {
+  startLine: number;
+  endLine?: number;
+  startColumn?: never;
+  endColumn?: never;
+  newText: string;
+};
+
+export type ColumnEditRange = {
+  startLine: number;
+  endLine?: never;
+  startColumn: number;
+  endColumn: number;
+  newText: string;
+};
+
+export type LeanEditRange = LineEditRange | ColumnEditRange;
+export type LeanEditInput = ({ path: string; edits?: never } & LeanEditRange) | CanonicalLeanEditInput;
+
+// Keep the provider-facing schema as one plain object. Cross-field invariants such
+// as paired columns and line-vs-column ranges are enforced by normalizeEdits().
+const leanEditRangeSchema = Type.Object({
   startLine: Type.Integer({ minimum: 1, description: "First line to replace (1-based, inclusive)" }),
   endLine: Type.Optional(Type.Integer({ minimum: 1, description: "Last line to replace (1-based, inclusive). Defaults to startLine." })),
-  newText: Type.String({ description: "Replacement text. Empty string deletes range." })
+  startColumn: Type.Optional(Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive). Must be provided with endColumn and without endLine." })),
+  endColumn: Type.Optional(Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive). Must be provided with startColumn and without endLine." })),
+  newText: Type.String({ description: "Replacement text. Empty string deletes the range; column replacements may contain newlines." })
 }, { additionalProperties: false });
 
-const columnEditRangeSchema = Type.Object({
-  startLine: Type.Integer({ minimum: 1, description: "Source line containing the columns to replace (1-based)" }),
-  startColumn: Type.Integer({ minimum: 1, description: "First column to replace (1-based, inclusive)" }),
-  endColumn: Type.Integer({ minimum: 1, description: "Last column to replace (1-based, inclusive)" }),
-  newText: Type.String({ description: "Replacement text, which may contain newlines. Empty string deletes range." })
+export const leanEditSchema = Type.Object({
+  path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
+  edits: Type.Array(leanEditRangeSchema, {
+    minItems: 1,
+    description: "One or more non-overlapping line or single-line column edits for this file. Use one item for a single edit."
+  })
 }, { additionalProperties: false });
+export type CanonicalLeanEditInput = Static<typeof leanEditSchema>;
 
-const leanEditRangeSchema = Type.Union([lineEditRangeSchema, columnEditRangeSchema]);
+/** Convert the former direct single-range form before provider schema validation. */
+export function prepareLeanEditArguments(input: unknown): CanonicalLeanEditInput {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input as CanonicalLeanEditInput;
+  const args = input as Record<string, unknown>;
+  if (args.edits !== undefined || args.startLine === undefined) return input as CanonicalLeanEditInput;
 
-const leanEditVariants = Type.Union([
-  Type.Object({
-    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
-    ...lineEditRangeSchema.properties
-  }, { additionalProperties: false }),
-  Type.Object({
-    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
-    ...columnEditRangeSchema.properties
-  }, { additionalProperties: false }),
-  Type.Object({
-    path: Type.String({ description: "Path to edit, relative to cwd unless absolute" }),
-    edits: Type.Array(leanEditRangeSchema, { minItems: 1, description: "One or more non-overlapping line or single-line column edits for this file." })
-  }, { additionalProperties: false })
-]);
-
-// Tool providers expect the root parameter schema to be an object, even when its shapes are expressed with anyOf.
-export const leanEditSchema = Type.Unsafe<Static<typeof leanEditVariants>>({ type: "object", ...leanEditVariants });
-export type LeanEditInput = Static<typeof leanEditSchema>;
+  const { startLine, endLine, startColumn, endColumn, newText, ...rest } = args;
+  return {
+    ...rest,
+    edits: [{
+      startLine,
+      ...(endLine !== undefined ? { endLine } : {}),
+      ...(startColumn !== undefined ? { startColumn } : {}),
+      ...(endColumn !== undefined ? { endColumn } : {}),
+      ...(newText !== undefined ? { newText } : {})
+    }]
+  } as CanonicalLeanEditInput;
+}
 
 type UnvalidatedEditRange = {
   startLine?: number;

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
 import { leanRead, leanReadSchema, type LeanReadResult } from "./read-tool.ts";
-import { leanEdit, leanEditSchema, StaleEditError } from "./edit-tool.ts";
+import { leanEdit, leanEditSchema, prepareLeanEditArguments, StaleEditError } from "./edit-tool.ts";
 import { failureDelta, formatLeanEditStats, LeanEditMetricsStore, type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
 import { renderDiffForLeanEdit } from "./diff-render.ts";
@@ -250,15 +250,16 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof leanEditSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
     name: "edit",
     label: "edit",
-    description: "Edit text file by one or more 1-based inclusive line ranges or column ranges within one source line.",
-    promptSnippet: "Edit lines with { path, startLine, endLine?, newText }; edit columns with { path, startLine, startColumn, endColumn, newText }; or batch either shape in edits[].",
+    description: "Edit a text file with one or more non-overlapping 1-based inclusive line or single-line column ranges.",
+    promptSnippet: "Edit ranges with { path, edits: [{ startLine, endLine?, startColumn?, endColumn?, newText }] }; use one item for a single edit.",
     promptGuidelines: [
-      "edit: use after read for same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace.",
+      "edit: use after read for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
       "edit: after success, edited ranges require another read or failed edit before reuse; line-count-preserving edits keep unaffected later reads valid.",
-      "edit: use edits[] for multiple non-overlapping ranges; do not combine top-level range fields with edits[]; newText: \"\" deletes.",
-      "edit: line ranges use startLine/endLine without columns; column ranges use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
+      "edit: always use edits[]; use one item for a single edit and multiple non-overlapping items for a batch; newText: \"\" deletes.",
+      "edit: line items use startLine/endLine without columns; column items use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
     ],
     parameters: leanEditSchema,
+    prepareArguments: prepareLeanEditArguments,
     renderShell: "default",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
