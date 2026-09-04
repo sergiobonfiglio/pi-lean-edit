@@ -31,7 +31,7 @@ pi -e npm:pi-lean-edit
 { path: string; offset?: number; limit?: number }
 ```
 
-Reads normal text with numbered full lines and stores shown ranges as in-memory snapshots. It also supports jpg, png, gif, and webp images. If a line exceeds the byte limit, `read` stops before it and directs the model to `read_huge_line`.
+Reads normal UTF-8 text with numbered full lines and stores shown ranges as in-memory snapshots. Invalid UTF-8 is rejected rather than decoded lossily. A UTF-8 BOM is hidden from the model and preserved on write, matching Pi's built-in edit behavior. It also supports jpg, png, gif, and webp images. If a line exceeds the byte limit, `read` stops before it and directs the model to `read_huge_line`.
 
 ### `edit`
 
@@ -40,7 +40,7 @@ type EditRange = { startLine: number; endLine?: number; newText: string };
 { path: string; edits: EditRange[] }
 ```
 
-Applies one or more non-overlapping inclusive full-line ranges only when they match text previously shown by `read` or a failed edit. A failed edit returns and snapshots bounded current context so it can be retried if appropriate. Successful replacement lines can be edited again immediately; deletions add no replacement rows. Same-line-count edits preserve unaffected snapshots, while line-count changes conservatively invalidate old suffix coverage. Uniform LF and CRLF files retain their style; mixed line endings are rejected.
+Applies one or more non-overlapping inclusive full-line ranges only when they match text previously shown by `read` or a failed edit and the file fingerprint still matches that read. A failed edit returns and snapshots bounded current context so it can be retried if appropriate. Successful replacement lines can be edited again immediately; deletions add no replacement rows. Same-line-count edits preserve unaffected snapshots, while line-count changes conservatively invalidate old suffix coverage. Like Pi's built-in edit, a BOM is preserved and bare CR or mixed line endings are normalized to the style of the first LF/CRLF line ending.
 
 ### `read_huge_line`
 
@@ -68,11 +68,15 @@ The provider-facing schemas remain plain objects without top-level `anyOf`, `one
 
 ## Concurrency
 
-Cooperating `pi-lean-edit` processes in one checkout serialize `edit`, `edit_huge_line`, and `write` mutations per canonical file; different files can still proceed concurrently. Snapshots are isolated per extension session and reset after session-tree navigation or compaction, so every agent must perform its own matching read before editing. For substantial parallel work, isolated worktrees or disjoint files are still preferable. Shell commands and other tools that do not use this cooperative lock can still race with these operations.
+Cooperating `pi-lean-edit` processes in one checkout serialize `edit`, `edit_huge_line`, and `write` mutations per canonical file; different files can still proceed concurrently. Snapshots remain isolated per extension session/process. Each process records a file fingerprint with its snapshots, so an intervening mutation by another process or by `write` makes the old snapshot stale even when identical text appears at the old coordinates. Snapshots reset after session-tree navigation or compaction, and every agent must perform its own matching read before editing. For substantial parallel work, isolated worktrees or disjoint files are still preferable. Shell commands and other tools that do not use the cooperative lock can still race with these operations.
+
+### Mutation writes
+
+Edits deliberately overwrite files in place with `fs.writeFile`, matching Pi's built-in edit and write tools. Atomic temporary-file replacement would add metadata, ownership, symlink, and platform-specific rename semantics that are not justified here. A rare write failure or process termination during the overwrite can therefore leave a partial file; version control remains the recovery mechanism.
 
 ## Metrics
 
-Global metrics persist under the configured Pi agent directory (`getAgentDir()/pi-lean-edit/metrics.json`) by default, or at `PI_LEAN_EDIT_METRICS_PATH` if set. Metrics are best-effort: persistence errors are warnings and never change a successful edit into a failure.
+Global metrics are an intentional product feature. They persist under the configured Pi agent directory (`getAgentDir()/pi-lean-edit/metrics.json`) by default, or at `PI_LEAN_EDIT_METRICS_PATH` if set. Metrics are best-effort: persistence errors are warnings and never change a successful edit into a failure.
 
 Show stats:
 
@@ -88,7 +92,7 @@ npm test
 
 ## Rendering expansion
 
-`pi-lean-edit` provides three rendering levels for each tool row, configured with `/lean-edit-settings`:
+Configurable rendering is an intentional product feature. `pi-lean-edit` provides three rendering levels for each tool row, configured with `/lean-edit-settings`:
 
 - `minimal`: use the tool's compact/collapsed renderer
 - `medium`: use detailed/expanded rendering, capped at 20 rendered lines
@@ -102,4 +106,4 @@ Collapsed defaults are all `minimal`. Expanded defaults are `read=minimal`, `edi
 
 Read content is capped by line, byte, and huge-line column limits. Defaults: `PI_LEAN_EDIT_MAX_READ_LINES=2000`, `PI_LEAN_EDIT_MAX_READ_BYTES=50000`, and `PI_LEAN_EDIT_MAX_READ_COLUMNS=400`. Override values must be positive integers.
 
-These limits apply to the displayed file-content payload (numbered lines or a huge-line column window). Summary text and continuation guidance are added outside that budget, so the complete tool result can be slightly larger.
+These limits apply to the displayed file-content payload (numbered lines or a huge-line column window). Summary text and continuation guidance are added outside that budget, so the complete tool result can be slightly larger. Reads and edits currently load the target file into memory; huge-line edit diffs are separately bounded to a small window around the change.

@@ -206,15 +206,36 @@ test("bare carriage returns in replacement text become line endings", async () =
   await expectFile(session, "A\n");
 });
 
-test("mixed line endings are rejected without changing the file", async () => {
-  const content = "a\r\nb\nc";
-  const session = await createSession(content);
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await assert.rejects(
-    () => leanEdit(session.dir, { path: session.file, startLine: 3, newText: "C" }, session.store),
-    /mixed line endings/
-  );
-  await expectFile(session, content);
+test("mixed and bare-CR line endings normalize like Pi's built-in edit", async (t) => {
+  await t.test("mixed endings follow the first newline style", async () => {
+    const session = await createSession("a\r\nb\nc");
+    await leanRead(session.dir, { path: session.file }, config, session.store);
+    await leanEdit(session.dir, { path: session.file, startLine: 3, newText: "C" }, session.store);
+    await expectFile(session, "a\r\nb\r\nC");
+  });
+
+  await t.test("bare carriage returns become LF", async () => {
+    const session = await createSession("a\rb\r");
+    await leanRead(session.dir, { path: session.file }, config, session.store);
+    await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, session.store);
+    await expectFile(session, "a\nB\n");
+  });
+});
+
+test("editing the first line preserves a UTF-8 BOM", async () => {
+  const session = await createSession("\uFEFFa\nb\n");
+  const read = await leanRead(session.dir, { path: session.file }, config, session.store);
+  assert.doesNotMatch(readText(read), /\uFEFF/);
+  await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "A" }, session.store);
+  await expectFile(session, "\uFEFFA\nb\n");
+});
+
+test("invalid UTF-8 is rejected before it can be rewritten", async () => {
+  const session = await createSession("placeholder");
+  await fs.writeFile(session.file, Buffer.from([0x61, 0x0a, 0xff, 0x0a]));
+  await assert.rejects(() => leanRead(session.dir, { path: session.file }, config, session.store), /not valid UTF-8/);
+  await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 1, newText: "A" }, session.store), /not valid UTF-8/);
+  assert.equal((await fs.readFile(session.file)).toString("hex"), "610aff0a");
 });
 test("deletion with empty newText", async () => {
   const session = await createSession("a\nb\nc\n");
@@ -439,6 +460,18 @@ test("external mutation of freshly seeded text is stale and refreshes it", async
   await fs.writeFile(session.file, "external\n", "utf8");
   const error = await expectStaleRefresh(() => leanEdit(session.dir, { path: session.file, startLine: 1, newText: "next" }, session.store));
   assert.equal(error.refreshedText, "1 │ external");
+});
+
+test("a fingerprint rejects shifted duplicate text from another session", async () => {
+  const session = await createSession("x\na\n");
+  const otherStore = new SnapshotStore();
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  await leanRead(session.dir, { path: session.file }, config, otherStore);
+  await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "y\na" }, session.store);
+
+  const error = await expectStaleRefresh(() => leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, otherStore));
+  assert.match(error.message, /changed since it was read/);
+  await expectFile(session, "y\na\na\n");
 });
 
 test("net-zero batches still invalidate old suffix coverage and reseed later outputs", async () => {

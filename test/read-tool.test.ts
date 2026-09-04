@@ -101,3 +101,13 @@ test("aborted read does not create a snapshot", async () => {
     (error: any) => error?.name === "AbortError"
   );
 });
+
+test("Unicode spaces in file names are preserved", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-read-space-"));
+  await fs.writeFile(path.join(dir, "a b"), "ascii space\n", "utf8");
+  await fs.writeFile(path.join(dir, "a\u00A0b"), "non-breaking space\n", "utf8");
+  const result = await leanRead(dir, { path: "a\u00A0b" }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
+  const content = result.content[0];
+  assert.equal(content?.type, "text");
+  if (content?.type === "text") assert.match(content.text, /non-breaking space/);
+});

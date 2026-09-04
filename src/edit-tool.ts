@@ -3,7 +3,7 @@ import { Type, type Static } from "typebox";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { firstChangedLine, unifiedDiff } from "./diff.ts";
-import { formatNumberedLines, hasMixedLineEndings, joinText, rangeText, replacementLines, resolveCanonicalPath, sliceRange, splitText, type SplitText } from "./line-utils.ts";
+import { decodeUtf8, fingerprintBytes, formatNumberedLines, joinText, rangeText, replacementLines, resolveCanonicalPath, sliceRange, splitText, type SplitText } from "./line-utils.ts";
 import { SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 import { type LeanEditDelta } from "./metrics.ts";
 
@@ -119,7 +119,8 @@ function successDelta(parts: Array<{ oldText: string; edit: NormalizedEdit }>): 
   return { attempts: 1, failures: 0, charsSaved: Math.max(0, charsNormalEdit - charsLeanEdit), charsNormalEdit, charsLeanEdit };
 }
 
-function refreshStaleRanges(store: SnapshotStore, path: string, edits: NormalizedEdit[], parsed: SplitText, config: LeanEditConfig): string | undefined {
+function refreshStaleRanges(store: SnapshotStore, path: string, fingerprint: string, edits: NormalizedEdit[], parsed: SplitText, config: LeanEditConfig): string | undefined {
+  store.observeFile(path, fingerprint);
   const contextLines = 5;
   const ranges: Array<{ startLine: number; endLine: number }> = [];
   for (const edit of edits) {
@@ -188,19 +189,22 @@ export async function leanEdit(
   signal?.throwIfAborted();
   if (store.revision(full) > invocationRevision) throw new Error("file stale, read again: snapshot changed while edit was starting");
   const initialSnapshots = edits.map((edit) => store.covered(full, edit.startLine, edit.endLine));
+  const initialFingerprint = store.fingerprint(full);
   const initialRevision = store.revision(full);
   let cleanupWarning: string | undefined;
 
   const result = await withInterprocessFileMutationLock(full, () => withFileMutationQueue(full, async () => {
     signal?.throwIfAborted();
     if (store.revision(full) !== initialRevision) throw new Error("file stale, read again: snapshot changed while edit was queued");
-    const before = await fs.readFile(full, "utf8");
+    const beforeBuffer = await fs.readFile(full);
+    const before = decodeUtf8(beforeBuffer);
+    const currentFingerprint = fingerprintBytes(beforeBuffer);
     signal?.throwIfAborted();
-    if (hasMixedLineEndings(before)) throw new Error("cannot safely edit a file with mixed line endings");
     const parsed = splitText(before);
     const parts: Array<{ oldText: string; edit: NormalizedEdit }> = [];
     let missingCoverage = false;
     let changedCoverage = false;
+    const fileChanged = initialFingerprint != null && initialFingerprint !== currentFingerprint;
 
     for (let i = 0; i < edits.length; i++) {
       const edit = edits[i]!;
@@ -212,14 +216,16 @@ export async function leanEdit(
       parts.push({ oldText: rangeText(parsed.lines, edit.startLine, edit.endLine, parsed.lineEnding), edit });
     }
 
-    if (missingCoverage || changedCoverage) {
-      const refreshedText = refreshStaleRanges(store, full, edits, parsed, config);
+    if (missingCoverage || changedCoverage || fileChanged) {
+      const refreshedText = refreshStaleRanges(store, full, currentFingerprint, edits, parsed, config);
       if (refreshedText == null) throw new Error("file stale, read again: updated range exceeds automatic refresh limits");
-      const reason = missingCoverage && changedCoverage
-        ? "one or more requested ranges were not read beforehand, and other requested text changed since it was read"
+      const reason = missingCoverage && (changedCoverage || fileChanged)
+        ? "one or more requested ranges were not read beforehand, and the file changed since an earlier read"
         : missingCoverage
           ? "one or more requested ranges were not read beforehand"
-          : "the requested text changed since it was read";
+          : changedCoverage
+            ? "the requested text changed since it was read"
+            : "the file changed since it was read";
       throw new StaleEditError(refreshedText, reason);
     }
 
@@ -228,9 +234,11 @@ export async function leanEdit(
       nextLines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, ...replacementLines(edit.newText));
     }
     const hasFinalEmptyReplacementRow = edits.some((edit) => edit.endLine === parsed.lines.length && /[\r\n]$/.test(edit.newText));
-    const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline || hasFinalEmptyReplacementRow);
+    const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline || hasFinalEmptyReplacementRow, parsed.bom);
     signal?.throwIfAborted();
+    // Deliberately matches Pi's built-in edit/write behavior: overwrite in place rather than adding rename semantics.
     await fs.writeFile(full, after, "utf8");
+    store.updateFingerprint(full, fingerprintBytes(Buffer.from(after, "utf8")));
     invalidateSnapshotsAfterEdit(store, full, edits);
     reseedReplacements(store, full, edits);
 

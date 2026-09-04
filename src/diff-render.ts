@@ -1,20 +1,22 @@
-function commonPrefixLength(a: string, b: string): number {
+function commonPrefixLength(a: string[], b: string[]): number {
   let i = 0;
   while (i < a.length && i < b.length && a[i] === b[i]) i++;
   return i;
 }
 
-function commonSuffixLength(a: string, b: string, prefix: number): number {
+function commonSuffixLength(a: string[], b: string[], prefix: number): number {
   let i = 0;
   while (i < a.length - prefix && i < b.length - prefix && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
   return i;
 }
 
 function highlightChangedPart(text: string, other: string, theme: any): string {
-  const prefix = commonPrefixLength(text, other);
-  const suffix = commonSuffixLength(text, other, prefix);
-  if (prefix + suffix >= text.length) return text;
-  return text.slice(0, prefix) + theme.inverse(text.slice(prefix, text.length - suffix)) + text.slice(text.length - suffix);
+  const points = Array.from(text);
+  const otherPoints = Array.from(other);
+  const prefix = commonPrefixLength(points, otherPoints);
+  const suffix = commonSuffixLength(points, otherPoints, prefix);
+  if (prefix + suffix >= points.length) return text;
+  return points.slice(0, prefix).join("") + theme.inverse(points.slice(prefix, points.length - suffix).join("")) + points.slice(points.length - suffix).join("");
 }
 
 function renderChangedRun(run: Array<{ sign: "-" | "+"; lineNo: number; text: string }>, theme: any): string[] {
@@ -43,6 +45,11 @@ export function renderDiffForLeanEdit(diffText: string, theme: any): string {
     if (!line || line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("Index:") || line.startsWith("=")) continue;
     const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunk) { flush(); oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue; }
+    if (line.startsWith("\\ No newline at end of file")) {
+      flush();
+      out.push(theme.fg("toolDiffContext", `   ${line}`));
+      continue;
+    }
     if (line.startsWith("-")) {
       run.push({ sign: "-", lineNo: oldLine, text: line.slice(1) });
       oldLine++;

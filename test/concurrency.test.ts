@@ -81,11 +81,13 @@ async function runCompetingEdits(t: test.TestContext, secondLine: number): Promi
   return { file, first, second };
 }
 
-test("separate processes preserve non-overlapping lean edits", async (t) => {
+test("separate processes reject edits after any intervening file generation", async (t) => {
   const { file, first, second } = await runCompetingEdits(t, 2);
   assert.equal(first.ok, true);
-  assert.equal(second.ok, true);
-  assert.equal(await fs.readFile(file, "utf8"), "ONE-A\nTWO-B\n");
+  assert.equal(second.ok, false);
+  assert.equal(second.stale, true);
+  assert.match(second.message ?? "", /file changed since it was read/);
+  assert.equal(await fs.readFile(file, "utf8"), "ONE-A\ntwo\n");
 });
 
 test("separate processes reject a stale competing lean edit", async (t) => {

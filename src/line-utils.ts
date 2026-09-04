@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,16 +9,15 @@ export type SplitText = {
   lines: string[];
   lineEnding: LineEnding;
   finalNewline: boolean;
+  bom: string;
 };
 
-const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
-
 export function expandPath(filePath: string): string {
+  // Unicode spaces are valid filename characters, so preserve them exactly.
   const normalized = filePath.startsWith("@") ? filePath.slice(1) : filePath;
-  const spaces = normalized.replace(UNICODE_SPACES, " ");
-  if (spaces === "~") return os.homedir();
-  if (spaces.startsWith("~/")) return os.homedir() + spaces.slice(1);
-  return spaces;
+  if (normalized === "~") return os.homedir();
+  if (normalized.startsWith("~/")) return os.homedir() + normalized.slice(1);
+  return normalized;
 }
 
 export async function resolveCanonicalPath(cwd: string, filePath: string): Promise<string> {
@@ -32,25 +32,30 @@ export function isBinary(buf: Buffer): boolean {
   return false;
 }
 
-export function splitText(text: string): SplitText {
-  const lineEnding: LineEnding = text.includes("\r\n") ? "\r\n" : "\n";
-  const finalNewline = text.endsWith("\n");
-  if (text.length === 0) return { lines: [], lineEnding, finalNewline: false };
-  const lines = text.split(/\r?\n/);
-  if (finalNewline) lines.pop();
-  return { lines, lineEnding, finalNewline };
+export function decodeUtf8(buf: Buffer): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buf);
+  } catch {
+    throw new Error("file is not valid UTF-8 text");
+  }
 }
 
-export function hasMixedLineEndings(text: string): boolean {
-  let sawLf = false;
-  let sawCrlf = false;
-  for (let index = 0; index < text.length; index++) {
-    if (text[index] !== "\n") continue;
-    if (index > 0 && text[index - 1] === "\r") sawCrlf = true;
-    else sawLf = true;
-    if (sawLf && sawCrlf) return true;
-  }
-  return false;
+export function fingerprintBytes(buf: Uint8Array): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+export function splitText(text: string): SplitText {
+  const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const content = bom ? text.slice(1) : text;
+  const crlfIndex = content.indexOf("\r\n");
+  const lfIndex = content.indexOf("\n");
+  const lineEnding: LineEnding = crlfIndex !== -1 && crlfIndex < lfIndex ? "\r\n" : "\n";
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const finalNewline = normalized.endsWith("\n");
+  if (normalized.length === 0) return { lines: [], lineEnding, finalNewline: false, bom };
+  const lines = normalized.split("\n");
+  if (finalNewline) lines.pop();
+  return { lines, lineEnding, finalNewline, bom };
 }
 export function replacementLines(newText: string): string[] {
   if (newText.length === 0) return [];
@@ -60,9 +65,9 @@ export function replacementLines(newText: string): string[] {
   return lines;
 }
 
-export function joinText(lines: string[], lineEnding: LineEnding, finalNewline: boolean): string {
-  if (lines.length === 0) return "";
-  return lines.join(lineEnding) + (finalNewline ? lineEnding : "");
+export function joinText(lines: string[], lineEnding: LineEnding, finalNewline: boolean, bom = ""): string {
+  if (lines.length === 0) return bom;
+  return bom + lines.join(lineEnding) + (finalNewline ? lineEnding : "");
 }
 
 export function sliceRange(lines: string[], startLine: number, endLine: number): string[] {

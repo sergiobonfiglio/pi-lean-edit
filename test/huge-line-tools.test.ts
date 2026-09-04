@@ -116,3 +116,21 @@ test("edit_huge_line stale refresh respects the configured column limit", async 
   );
   assert.deepEqual(s.store.columnRanges(s.file), []);
 });
+
+test("edit_huge_line returns a bounded diff with the real line number", async () => {
+  const huge = "x".repeat(1_000_000);
+  const s = await session(`prefix\n${huge}\n`);
+  const largeConfig = { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 };
+  await leanReadHugeLine(s.dir, { path: s.file, line: 2, columnOffset: 500_000, columnLimit: 1 }, largeConfig, s.store);
+  const result = await leanEditHugeLine(s.dir, { path: s.file, line: 2, startColumn: 500_000, endColumn: 500_000, newText: "Y" }, s.store, largeConfig);
+  assert.ok(Buffer.byteLength(result.diff, "utf8") < 2_000);
+  assert.match(result.diff, /@@ -2,1 \+2,1 @@/);
+  assert.match(result.diff, /Y/);
+});
+
+test("edit_huge_line preserves a UTF-8 BOM", async () => {
+  const s = await session(`\uFEFF${"x".repeat(100)}\n`);
+  await leanReadHugeLine(s.dir, { path: s.file, line: 1, columnOffset: 1, columnLimit: 1 }, config, s.store);
+  await leanEditHugeLine(s.dir, { path: s.file, line: 1, startColumn: 1, endColumn: 1, newText: "Y" }, s.store, config);
+  assert.equal((await fs.readFile(s.file, "utf8")).startsWith("\uFEFFY"), true);
+});

@@ -100,3 +100,17 @@ test("seedless invalidation retains and advances the file revision", () => {
   store.truncateAfter("/tmp/a", 0);
   assert.ok(store.revision("/tmp/a") > invalidated);
 });
+
+test("file fingerprints invalidate stale process-local snapshots", () => {
+  const store = new SnapshotStore();
+  store.observeFile("/tmp/a", "first");
+  store.set({ path: "/tmp/a", startLine: 1, endLine: 1, lines: ["same"] });
+  store.observeFile("/tmp/a", "second");
+  assert.equal(store.covered("/tmp/a", 1, 1), undefined);
+
+  store.set({ path: "/tmp/a", startLine: 1, endLine: 1, lines: ["replacement"] });
+  store.updateFingerprint("/tmp/a", "third");
+  assert.deepEqual(store.covered("/tmp/a", 1, 1)?.lines, ["replacement"]);
+  store.clear("/tmp/a");
+  assert.equal(store.covered("/tmp/a", 1, 1), undefined);
+});
