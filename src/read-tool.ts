@@ -283,7 +283,7 @@ export async function leanRead(cwd: string, input: LeanReadInput, config: LeanRe
       text: windowText,
       lineLength,
       lineEnding: parsed.lineEnding,
-      hugeLine
+      editEligible: hugeLine
     });
 
     const numbered = formatColumnLine(startLine, startColumn, endColumn, windowText);
@@ -337,7 +337,7 @@ export async function leanRead(cwd: string, input: LeanReadInput, config: LeanRe
         text: windowText,
         lineLength,
         lineEnding: parsed.lineEnding,
-        hugeLine: true
+        editEligible: true
       });
       truncatedBy = "columns";
       break;

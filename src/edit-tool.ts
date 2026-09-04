@@ -84,6 +84,14 @@ type SnapshotCoverage =
   | { kind: "full-line"; lines: string[] }
   | { kind: "column"; snapshot: ColumnSnapshot };
 
+type PostEditSeed =
+  | { kind: "full-line"; startLine: number; lines: string[] }
+  | { kind: "column"; line: number; startColumn: number; endColumn: number; text: string };
+
+type SymbolicPiece =
+  | { kind: "known"; text: string }
+  | { kind: "unknown"; length?: number };
+
 export type LeanEditResult = {
   text: string;
   diff: string;
@@ -197,7 +205,7 @@ function lookupCoverage(store: SnapshotStore, full: string, edit: NormalizedEdit
   const wholeLine = store.covered(full, edit.startLine, edit.startLine);
   if (wholeLine) return { kind: "full-line", lines: wholeLine.lines };
   const columnSnapshot = store.coveredColumns(full, edit.startLine, edit.startColumn, edit.endColumn);
-  if (!columnSnapshot || !columnSnapshot.hugeLine) return undefined;
+  if (!columnSnapshot?.editEligible) return undefined;
   return { kind: "column", snapshot: columnSnapshot };
 }
 
@@ -265,7 +273,7 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
         text,
         lineLength: codePointLength(line),
         lineEnding: parsed.lineEnding,
-        hugeLine: true
+        editEligible: true
       })
     });
   }
@@ -276,6 +284,130 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
   if (outputLines > config.maxLines || Buffer.byteLength(text, "utf8") > config.maxBytes) return undefined;
   for (const entry of entries) entry.store();
   return text;
+}
+
+function normalizeColumnReplacement(newText: string, lineEnding: SplitText["lineEnding"]): string {
+  return newText.replace(/\r\n|\r|\n/g, lineEnding);
+}
+
+function applyColumnEdits(line: string, edits: NormalizedEdit[], lineEnding: SplitText["lineEnding"]): string {
+  let result = line;
+  for (const edit of [...edits].sort((a, b) => b.startColumn! - a.startColumn!)) {
+    result = replaceColumns(result, edit.startColumn!, edit.endColumn!, normalizeColumnReplacement(edit.newText, lineEnding));
+  }
+  return result;
+}
+
+function columnOutputLineCount(edits: NormalizedEdit[], lineEnding: SplitText["lineEnding"]): number {
+  return 1 + edits.reduce((count, edit) => count + normalizeColumnReplacement(edit.newText, lineEnding).split(lineEnding).length - 1, 0);
+}
+
+function partialColumnSeeds(edits: NormalizedEdit[], finalStartLine: number, lineEnding: SplitText["lineEnding"]): PostEditSeed[] {
+  const rows: Array<{ pieces: SymbolicPiece[] }> = [{ pieces: [] }];
+  let row = rows[0]!;
+  let sourceColumn = 1;
+
+  const appendUnknown = (length?: number): void => {
+    if (length === 0) return;
+    row.pieces.push({ kind: "unknown", length });
+  };
+  const appendReplacement = (newText: string): void => {
+    const fragments = normalizeColumnReplacement(newText, lineEnding).split(lineEnding);
+    for (let i = 0; i < fragments.length; i++) {
+      const text = fragments[i]!;
+      if (text) row.pieces.push({ kind: "known", text });
+      if (i < fragments.length - 1) {
+        row = { pieces: [] };
+        rows.push(row);
+      }
+    }
+  };
+
+  for (const edit of edits) {
+    appendUnknown(edit.startColumn! - sourceColumn);
+    appendReplacement(edit.newText);
+    sourceColumn = edit.endColumn! + 1;
+  }
+  // The unread suffix might be empty, but its length was not exposed. Keeping it
+  // symbolic prevents an internal filesystem read from promoting the final row.
+  appendUnknown();
+
+  const seeds: PostEditSeed[] = [];
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const pieces = rows[rowIndex]!.pieces;
+    const line = finalStartLine + rowIndex;
+    if (pieces.every((piece) => piece.kind === "known")) {
+      seeds.push({ kind: "full-line", startLine: line, lines: [pieces.map((piece) => piece.kind === "known" ? piece.text : "").join("")] });
+      continue;
+    }
+
+    let column = 1;
+    for (const piece of pieces) {
+      if (piece.kind === "unknown") {
+        if (piece.length == null) break;
+        column += piece.length;
+        continue;
+      }
+      const length = codePointLength(piece.text);
+      if (length > 0) seeds.push({ kind: "column", line, startColumn: column, endColumn: column + length - 1, text: piece.text });
+      column += length;
+    }
+  }
+  return seeds;
+}
+
+function buildPostEditSeeds(edits: NormalizedEdit[], coverages: Array<SnapshotCoverage | undefined>, parsed: SplitText, after: string): PostEditSeed[] {
+  const seeds: PostEditSeed[] = [];
+  let lineDelta = 0;
+
+  for (let i = 0; i < edits.length;) {
+    const edit = edits[i]!;
+    const finalStartLine = edit.startLine + lineDelta;
+    if (edit.startColumn == null || edit.endColumn == null) {
+      const lines = replacementLines(edit.newText);
+      if (lines.length > 0) seeds.push({ kind: "full-line", startLine: finalStartLine, lines });
+      lineDelta += lines.length - (edit.endLine - edit.startLine + 1);
+      i++;
+      continue;
+    }
+
+    let end = i + 1;
+    while (end < edits.length && edits[end]!.startLine === edit.startLine && edits[end]!.startColumn != null) end++;
+    const lineEdits = edits.slice(i, end);
+    const lineCoverages = coverages.slice(i, end);
+    if (lineCoverages.every((coverage) => coverage?.kind === "full-line")) {
+      const sourceLine = (lineCoverages[0] as Extract<SnapshotCoverage, { kind: "full-line" }>).lines[0]!;
+      const lines = applyColumnEdits(sourceLine, lineEdits, parsed.lineEnding).split(parsed.lineEnding);
+      seeds.push({ kind: "full-line", startLine: finalStartLine, lines });
+    } else {
+      seeds.push(...partialColumnSeeds(lineEdits, finalStartLine, parsed.lineEnding));
+    }
+    lineDelta += columnOutputLineCount(lineEdits, parsed.lineEnding) - 1;
+    i = end;
+  }
+
+  const afterLines = splitText(after).lines;
+  const validated: PostEditSeed[] = [];
+  for (const seed of seeds) {
+    if (seed.kind === "full-line") {
+      let lines = seed.lines;
+      const endLine = seed.startLine + lines.length - 1;
+      // A terminal empty logical row is represented only by the file's final
+      // newline, so splitText() does not expose it as an addressable row.
+      if (endLine === afterLines.length + 1 && lines.at(-1) === "") lines = lines.slice(0, -1);
+      if (lines.length === 0) continue;
+      const actual = sliceRange(afterLines, seed.startLine, seed.startLine + lines.length - 1);
+      if (!snapshotMatches(lines, actual)) throw new Error("internal post-edit snapshot seed mismatch");
+      validated.push({ ...seed, lines });
+      continue;
+    }
+    const actualLine = afterLines[seed.line - 1];
+    if (actualLine == null || sliceColumns(actualLine, seed.startColumn, seed.endColumn) !== seed.text) {
+      throw new Error("internal post-edit snapshot seed mismatch");
+    }
+    validated.push(seed);
+  }
+  return validated;
 }
 
 function keepsSameLineCount(edit: NormalizedEdit): boolean {
@@ -294,6 +426,17 @@ function invalidateSnapshotsAfterEdit(store: SnapshotStore, path: string, edits:
     .filter((edit) => edit.endLine < firstLineCountChange.startLine)
     .map(({ startLine, endLine }) => ({ startLine, endLine }));
   if (preservedPrefixEdits.length) store.invalidateRanges(path, preservedPrefixEdits);
+}
+
+function reseedSnapshots(store: SnapshotStore, path: string, seeds: PostEditSeed[], lineEnding: SplitText["lineEnding"]): void {
+  const readAt = Date.now();
+  for (const seed of seeds) {
+    if (seed.kind === "full-line") {
+      store.set({ path, readAt, startLine: seed.startLine, endLine: seed.startLine + seed.lines.length - 1, lines: seed.lines, lineEnding });
+    } else {
+      store.setColumns({ path, readAt, line: seed.line, startColumn: seed.startColumn, endColumn: seed.endColumn, text: seed.text, lineEnding, editEligible: true });
+    }
+  }
 }
 
 export async function leanEdit(
@@ -358,13 +501,7 @@ export async function leanEdit(
     }
 
     for (const [lineNumber, lineEdits] of columnEditsByLine) {
-      lineEdits.sort((a, b) => b.startColumn! - a.startColumn!);
-      let line = nextLines[lineNumber - 1]!;
-      for (const edit of lineEdits) {
-        const newText = edit.newText.replace(/\r\n|\r|\n/g, parsed.lineEnding);
-        line = replaceColumns(line, edit.startColumn!, edit.endColumn!, newText);
-      }
-      nextLines[lineNumber - 1] = line;
+      nextLines[lineNumber - 1] = applyColumnEdits(nextLines[lineNumber - 1]!, lineEdits, parsed.lineEnding);
     }
 
     for (const edit of [...edits].reverse()) {
@@ -372,9 +509,14 @@ export async function leanEdit(
       nextLines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, ...replacementLines(edit.newText));
     }
 
-    const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline);
+    const hasFinalEmptyReplacementRow = edits.some((edit) =>
+      edit.startColumn == null && edit.endLine === parsed.lines.length && replacementLines(edit.newText).at(-1) === ""
+    );
+    const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline || hasFinalEmptyReplacementRow);
+    const seeds = buildPostEditSeeds(edits, initialCoverages, parsed, after);
     await fs.writeFile(full, after, "utf8");
     invalidateSnapshotsAfterEdit(store, full, edits);
+    reseedSnapshots(store, full, seeds, parsed.lineEnding);
 
     const diff = unifiedDiff(input.path, before, after);
     const delta = multiSuccessDelta(parts);

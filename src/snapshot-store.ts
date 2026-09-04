@@ -19,7 +19,7 @@ export type ColumnSnapshot = {
   text: string;
   lineLength?: number;
   lineEnding: LineEnding;
-  hugeLine: boolean;
+  editEligible: boolean;
 };
 
 type SnapshotSegment = Omit<FileSnapshot, "path">;
@@ -86,7 +86,7 @@ function columnSegmentSlice(segment: ColumnSnapshotSegment, startColumn: number,
 function canMergeColumnSegments(a: ColumnSnapshotSegment, b: ColumnSnapshotSegment): boolean {
   return a.line === b.line &&
     a.lineEnding === b.lineEnding &&
-    a.hugeLine === b.hugeLine &&
+    a.editEligible === b.editEligible &&
     a.lineLength === b.lineLength &&
     b.startColumn <= a.endColumn + 1;
 }
@@ -156,7 +156,7 @@ export class SnapshotStore {
       text: snapshot.text,
       lineLength: snapshot.lineLength,
       lineEnding: snapshot.lineEnding,
-      hugeLine: snapshot.hugeLine
+      editEligible: snapshot.editEligible
     });
     memory.columnSegments = mergeAdjacentColumns(next);
     memory.revision = ++this.nextRevision;
@@ -213,12 +213,9 @@ export class SnapshotStore {
     const nextColumns = memory.columnSegments
       .filter((segment) => !ranges.some((range) => segment.line >= range.startLine && segment.line <= range.endLine))
       .map(cloneColumnSegment);
-    if (next.length === 0 && nextColumns.length === 0) this.files.delete(path);
-    else {
-      memory.segments = mergeAdjacent(next);
-      memory.columnSegments = nextColumns;
-      memory.revision = ++this.nextRevision;
-    }
+    memory.segments = mergeAdjacent(next);
+    memory.columnSegments = nextColumns;
+    memory.revision = ++this.nextRevision;
   }
 
   truncateAfter(path: string, lastLineToKeep: number): void {
@@ -231,12 +228,9 @@ export class SnapshotStore {
       else next.push(segmentSlice(segment, segment.startLine, lastLineToKeep));
     }
     const nextColumns = memory.columnSegments.filter((segment) => segment.line <= lastLineToKeep).map(cloneColumnSegment);
-    if (next.length === 0 && nextColumns.length === 0) this.files.delete(path);
-    else {
-      memory.segments = mergeAdjacent(next);
-      memory.columnSegments = nextColumns;
-      memory.revision = ++this.nextRevision;
-    }
+    memory.segments = mergeAdjacent(next);
+    memory.columnSegments = nextColumns;
+    memory.revision = ++this.nextRevision;
   }
 
   clear(): void {

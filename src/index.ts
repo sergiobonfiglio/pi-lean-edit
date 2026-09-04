@@ -254,7 +254,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Edit ranges with { path, edits: [{ startLine, endLine?, startColumn?, endColumn?, newText }] }; use one item for a single edit.",
     promptGuidelines: [
       "edit: use after read for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
-      "edit: after success, edited ranges require another read or failed edit before reuse; line-count-preserving edits keep unaffected later reads valid.",
+      "edit: successful replacement content can be reused immediately; deletions add no replacement rows; same-count edits preserve unaffected rows, while line-count changes conservatively invalidate old suffix coverage.",
       "edit: always use edits[]; use one item for a single edit and multiple non-overlapping items for a batch; newText: \"\" deletes.",
       "edit: line items use startLine/endLine without columns; column items use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
     ],
