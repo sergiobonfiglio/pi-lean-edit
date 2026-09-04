@@ -244,7 +244,7 @@ export default function (pi: ExtensionAPI) {
       const result = await run();
       const { snapshot, warning } = await recordMetrics(result.delta);
       return {
-        content: [{ type: "text" as const, text: [result.text, statsLine(snapshot), warning].filter(Boolean).join("\n") }],
+        content: [{ type: "text" as const, text: [result.text, result.warning, statsLine(snapshot), warning].filter(Boolean).join("\n") }],
         details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
       };
     } catch (error) {

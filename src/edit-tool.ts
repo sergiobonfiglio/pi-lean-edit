@@ -60,6 +60,7 @@ type NormalizedEdit = {
 
 export type LeanEditResult = {
   text: string;
+  warning?: string;
   diff: string;
   firstChangedLine?: number;
   delta: LeanEditDelta;
@@ -105,6 +106,38 @@ function normalizeEdits(input: CanonicalLeanEditInput): NormalizedEdit[] {
 
 function snapshotMatches(expected: string[], actual: string[]): boolean {
   return expected.length === actual.length && expected.every((line, index) => line === actual[index]);
+}
+
+function withoutTrailingReplacementLine(newText: string): string {
+  const lines = replacementLines(newText);
+  lines.pop();
+  if (lines.length === 0) return "";
+  const needsTrailingNewline = /[\r\n]$/.test(newText) || lines.at(-1) === "";
+  return lines.join("\n") + (needsTrailingNewline ? "\n" : "");
+}
+
+function deduplicateBoundaryLines(edits: NormalizedEdit[], sourceLines: string[]): { edits: NormalizedEdit[]; followingLines: number[] } {
+  const followingLines: number[] = [];
+  const effectiveEdits = edits.map((edit) => {
+    const followingLine = edit.endLine + 1;
+    if (followingLine > sourceLines.length) return edit;
+    if (edits.some((candidate) => candidate !== edit && candidate.startLine <= followingLine && followingLine <= candidate.endLine)) return edit;
+    const lines = replacementLines(edit.newText);
+    if (lines.length === 0 || lines.at(-1) !== sourceLines[followingLine - 1]) return edit;
+    followingLines.push(followingLine);
+    return { ...edit, newText: withoutTrailingReplacementLine(edit.newText) };
+  });
+  return { edits: effectiveEdits, followingLines: [...new Set(followingLines)].sort((a, b) => a - b) };
+}
+
+function boundaryDeduplicationWarning(lines: number[]): string | undefined {
+  if (lines.length === 0) return undefined;
+  if (lines.length === 1) {
+    const line = lines[0]!;
+    return `Deduplicated a trailing replacement line because it exactly matched unchanged source line ${line}. To keep both lines intentionally, include line ${line} in the replacement range and provide both copies explicitly.`;
+  }
+  const listed = `${lines.slice(0, -1).join(", ")} and ${lines.at(-1)}`;
+  return `Deduplicated trailing replacement lines matching unchanged source lines ${listed}. To keep repeated lines intentionally, include each listed following line in its replacement range and provide both copies explicitly.`;
 }
 
 function editAddressSize(edit: NormalizedEdit): number {
@@ -216,24 +249,28 @@ export async function leanEdit(
       throw new StaleEditError(refreshedText, reason);
     }
 
+    const boundaryDeduplication = deduplicateBoundaryLines(edits, parsed.lines);
+    const effectiveEdits = boundaryDeduplication.edits;
+    const effectiveParts = parts.map((part, index) => ({ ...part, edit: effectiveEdits[index]! }));
     const nextLines = [...parsed.lines];
-    for (const edit of [...edits].reverse()) {
+    for (const edit of [...effectiveEdits].reverse()) {
       nextLines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, ...replacementLines(edit.newText));
     }
-    const hasFinalEmptyReplacementRow = edits.some((edit) => edit.endLine === parsed.lines.length && /[\r\n]$/.test(edit.newText));
+    const hasFinalEmptyReplacementRow = effectiveEdits.some((edit) => edit.endLine === parsed.lines.length && /[\r\n]$/.test(edit.newText));
     const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline || hasFinalEmptyReplacementRow, parsed.bom);
     signal?.throwIfAborted();
     // Deliberately matches Pi's built-in edit/write behavior: overwrite in place rather than adding rename semantics.
     await fs.writeFile(full, after, "utf8");
-    invalidateSnapshotsAfterEdit(store, full, edits);
-    reseedReplacements(store, full, edits);
+    invalidateSnapshotsAfterEdit(store, full, effectiveEdits);
+    reseedReplacements(store, full, effectiveEdits);
 
     const labels = edits.map((edit) => edit.startLine === edit.endLine ? `${edit.startLine}` : `${edit.startLine}-${edit.endLine}`).join(",");
     return {
       text: `Applied edit to ${prepared.path}:${labels}`,
+      warning: boundaryDeduplicationWarning(boundaryDeduplication.followingLines),
       diff: unifiedDiff(prepared.path, before, after),
       firstChangedLine: firstChangedLine(before, after),
-      delta: successDelta(parts)
+      delta: successDelta(effectiveParts)
     };
   });
 }

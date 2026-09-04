@@ -374,3 +374,21 @@ test("tree navigation rebuilds session metrics from the active branch", async ()
   await commands.get("lean-edit-stats").handler("", ctx);
   assert.match(notifications.at(-1)!, /session\s+0\s+0/);
 });
+
+test("registered edit exposes boundary deduplication warning in model-visible content", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "old\nfollowing\nafter\n", "utf8");
+  const tools = registerTools(path.join(dir, "metrics.json"));
+  const ctx = { cwd: dir };
+  await tools.get("read").execute("read", { path: file }, undefined, undefined, ctx);
+
+  const result = await tools.get("edit").execute("edit", {
+    path: file,
+    edits: [{ startLine: 1, newText: "updated\nfollowing" }]
+  }, undefined, undefined, ctx);
+
+  assert.match(result.content[0].text, /Deduplicated a trailing replacement line because it exactly matched unchanged source line 2\./);
+  assert.match(result.content[0].text, /include line 2 in the replacement range and provide both copies explicitly\./);
+  assert.equal(await fs.readFile(file, "utf8"), "updated\nfollowing\nafter\n");
+});

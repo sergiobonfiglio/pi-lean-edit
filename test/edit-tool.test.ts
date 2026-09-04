@@ -472,7 +472,7 @@ test("identical text at requested coordinates remains editable after another ses
   const otherStore = new SnapshotStore();
   await leanRead(session.dir, { path: session.file }, config, session.store);
   await leanRead(session.dir, { path: session.file }, config, otherStore);
-  await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "y\na" }, session.store);
+  await leanEdit(session.dir, { path: session.file, startLine: 1, endLine: 2, newText: "y\na\na" }, session.store);
 
   await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "B" }, otherStore);
   await expectFile(session, "y\nB\na\n");
@@ -491,4 +491,140 @@ test("net-zero batches still invalidate old suffix coverage and reseed later out
   await leanEdit(session.dir, { path: session.file, startLine: 4, newText: "TAIL" }, session.store);
   await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 3, newText: "TWO" }, session.store), StaleEditError);
   await expectFile(session, "one\nextra\n2\nTAIL\n");
+});
+
+test("deduplicates an exact trailing replacement line at an unchanged boundary", async () => {
+  const session = await createSession("function run() {\n  old();\n}\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    startLine: 2,
+    newText: "  replacement();\n}"
+  }, session.store);
+
+  await expectFile(session, "function run() {\n  replacement();\n}\nafter\n");
+  assert.equal(
+    result.warning,
+    "Deduplicated a trailing replacement line because it exactly matched unchanged source line 3. To keep both lines intentionally, include line 3 in the replacement range and provide both copies explicitly."
+  );
+});
+
+test("deduplicates exact non-delimiter boundary repetitions", async () => {
+  const session = await createSession("old\nreturn done;\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "updated\nreturn done;" }, session.store);
+
+  await expectFile(session, "updated\nreturn done;\nafter\n");
+  assert.match(result.warning ?? "", /unchanged source line 2/);
+});
+
+test("an exact one-line replacement matching the following line becomes a deletion", async () => {
+  const session = await createSession("remove me\nkeep me\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "keep me" }, session.store);
+
+  await expectFile(session, "keep me\nafter\n");
+  assert.match(result.warning ?? "", /unchanged source line 2/);
+});
+
+test("does not deduplicate trim-only boundary equality", async () => {
+  const session = await createSession("old\n  repeated\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "updated\nrepeated" }, session.store);
+
+  await expectFile(session, "updated\nrepeated\n  repeated\nafter\n");
+  assert.equal(result.warning, undefined);
+});
+
+test("empty deletions and edits at EOF do not trigger boundary deduplication", async (t) => {
+  await t.test("empty deletion", async () => {
+    const session = await createSession("a\nb\nc\n");
+    await leanRead(session.dir, { path: session.file }, config, session.store);
+    const result = await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "" }, session.store);
+    await expectFile(session, "a\nc\n");
+    assert.equal(result.warning, undefined);
+  });
+
+  await t.test("following line absent", async () => {
+    const session = await createSession("a\nold\n");
+    await leanRead(session.dir, { path: session.file }, config, session.store);
+    const result = await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "updated\nextra" }, session.store);
+    await expectFile(session, "a\nupdated\nextra\n");
+    assert.equal(result.warning, undefined);
+  });
+});
+
+test("deduplicates independent batch boundaries and reports sorted source lines", async () => {
+  const session = await createSession("old one\nshared one\nmiddle\nold two\nshared two\nend\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    edits: [
+      { startLine: 4, newText: "new two\nshared two" },
+      { startLine: 1, newText: "new one\nshared one" }
+    ]
+  }, session.store);
+
+  await expectFile(session, "new one\nshared one\nmiddle\nnew two\nshared two\nend\n");
+  assert.equal(
+    result.warning,
+    "Deduplicated trailing replacement lines matching unchanged source lines 2 and 5. To keep repeated lines intentionally, include each listed following line in its replacement range and provide both copies explicitly."
+  );
+});
+
+test("does not deduplicate a following source line changed by an adjacent batch range", async () => {
+  const session = await createSession("old\nboundary\ntail\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    edits: [
+      { startLine: 1, newText: "replacement\nboundary" },
+      { startLine: 2, newText: "BOUNDARY" }
+    ]
+  }, session.store);
+
+  await expectFile(session, "replacement\nboundary\nBOUNDARY\ntail\n");
+  assert.equal(result.warning, undefined);
+});
+
+test("expanded range preserves intentional adjacent duplicates", async () => {
+  const session = await createSession("old\nrepeated\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    startLine: 1,
+    endLine: 2,
+    newText: "updated\nrepeated\nrepeated"
+  }, session.store);
+
+  await expectFile(session, "updated\nrepeated\nrepeated\nafter\n");
+  assert.equal(result.warning, undefined);
+});
+
+test("boundary deduplication preserves terminal-newline replacement behavior", async () => {
+  const session = await createSession("before\nold\nfollowing\nafter");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    startLine: 2,
+    newText: "replacement\nfollowing\n"
+  }, session.store);
+
+  await expectFile(session, "before\nreplacement\nfollowing\nafter");
+  assert.match(result.warning ?? "", /unchanged source line 3/);
+});
+
+test("boundary deduplication metrics and snapshots use the effective replacement", async () => {
+  const session = await createSession("before\nold\nfollowing\nafter\n");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  const result = await leanEdit(session.dir, {
+    path: session.file,
+    startLine: 2,
+    newText: "new\nfollowing"
+  }, session.store);
+
+  assert.deepEqual(result.delta, { attempts: 1, failures: 0, charsSaved: 1, charsNormalEdit: 6, charsLeanEdit: 5 });
+  await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "again" }, session.store);
+  await leanEdit(session.dir, { path: session.file, startLine: 4, newText: "AFTER" }, session.store);
+  await expectFile(session, "before\nagain\nfollowing\nAFTER\n");
 });
