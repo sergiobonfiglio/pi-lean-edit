@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import registerExtension from "../src/index.ts";
 
-function registerTools(metricsPath: string): Map<string, any> {
+function registerTools(metricsPath: string, events = new Map<string, (...args: any[]) => any>()): Map<string, any> {
   const tools = new Map<string, any>();
   const previousMetricsPath = process.env.PI_LEAN_EDIT_METRICS_PATH;
   process.env.PI_LEAN_EDIT_METRICS_PATH = metricsPath;
@@ -15,7 +15,7 @@ function registerTools(metricsPath: string): Map<string, any> {
         tools.set(tool.name, tool);
       },
       registerCommand() {},
-      on() {}
+      on(name: string, handler: (...args: any[]) => any) { events.set(name, handler); }
     } as any);
   } finally {
     if (previousMetricsPath == null) delete process.env.PI_LEAN_EDIT_METRICS_PATH;
@@ -65,4 +65,94 @@ test("registered edit execute throws with stale guidance and recorded metrics", 
   const metrics = JSON.parse(await fs.readFile(metricsPath, "utf8"));
   assert.equal(metrics.attempts, 1);
   assert.equal(metrics.failures, 1);
+});
+
+test("metrics persistence failure does not turn an applied edit into a tool failure", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  const metricsPath = path.join(dir, "metrics.json");
+  await fs.writeFile(file, "before\n", "utf8");
+  await fs.writeFile(metricsPath, "not json", "utf8");
+  const tools = registerTools(metricsPath);
+  const readTool = tools.get("read");
+  const editTool = tools.get("edit");
+
+  await readTool.execute("read-id", { path: file }, undefined, undefined, { cwd: dir });
+  const first = await editTool.execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "after" }] }, undefined, undefined, { cwd: dir });
+  assert.match(first.content[0].text, /Applied edit/);
+  assert.match(first.content[0].text, /Could not persist lean-edit metrics/);
+  assert.equal(await fs.readFile(file, "utf8"), "after\n");
+
+  await fs.writeFile(metricsPath, "{}", "utf8");
+  const second = await editTool.execute("edit-id-2", { path: file, edits: [{ startLine: 1, newText: "again" }] }, undefined, undefined, { cwd: dir });
+  assert.doesNotMatch(second.content[0].text, /Could not persist lean-edit metrics/);
+  assert.equal(await fs.readFile(file, "utf8"), "again\n");
+});
+
+test("snapshot reads are isolated between extension instances", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "before\n", "utf8");
+  const firstTools = registerTools(path.join(dir, "first-metrics.json"));
+  const secondTools = registerTools(path.join(dir, "second-metrics.json"));
+
+  await firstTools.get("read").execute("read-id", { path: file }, undefined, undefined, { cwd: dir });
+  await assert.rejects(
+    () => secondTools.get("edit").execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "after" }] }, undefined, undefined, { cwd: dir }),
+    /one or more requested ranges were not read beforehand/
+  );
+  assert.equal(await fs.readFile(file, "utf8"), "before\n");
+});
+
+test("conversation context changes clear prior read snapshots", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "before\n", "utf8");
+  const events = new Map<string, (...args: any[]) => any>();
+  const tools = registerTools(path.join(dir, "metrics.json"), events);
+
+  await tools.get("read").execute("read-id", { path: file }, undefined, undefined, { cwd: dir });
+  events.get("session_tree")!({}, {});
+  await assert.rejects(
+    () => tools.get("edit").execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "after" }] }, undefined, undefined, { cwd: dir }),
+    /one or more requested ranges were not read beforehand/
+  );
+});
+
+test("extension registers dedicated huge-line tools with separated schemas", async () => {
+  const dir = await tempDir();
+  const tools = registerTools(path.join(dir, "metrics.json"));
+  assert.deepEqual([...tools.keys()].sort(), ["edit", "edit_huge_line", "read", "read_huge_line", "write"]);
+  assert.deepEqual(Object.keys(tools.get("read").parameters.properties), ["path", "offset", "limit"]);
+  assert.deepEqual(Object.keys(tools.get("edit").parameters.properties.edits.items.properties), ["startLine", "endLine", "newText"]);
+  assert.deepEqual(Object.keys(tools.get("read_huge_line").parameters.properties), ["path", "line", "columnOffset", "columnLimit"]);
+  assert.deepEqual(Object.keys(tools.get("edit_huge_line").parameters.properties), ["path", "line", "startColumn", "endColumn", "newText"]);
+});
+
+test("registered huge-line read and edit share snapshot coverage", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "huge.txt");
+  await fs.writeFile(file, `${"0123456789".repeat(6000)}\n`, "utf8");
+  const tools = registerTools(path.join(dir, "metrics.json"));
+  await tools.get("read_huge_line").execute("read-huge", { path: file, line: 1, columnOffset: 5, columnLimit: 6 }, undefined, undefined, { cwd: dir });
+  await tools.get("edit_huge_line").execute("edit-huge", { path: file, line: 1, startColumn: 6, endColumn: 8, newText: "xyz" }, undefined, undefined, { cwd: dir });
+  assert.match(await fs.readFile(file, "utf8"), /^01234xyz89/);
+});
+
+test("registered read and edit honor aborted signals", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "before\n", "utf8");
+  const tools = registerTools(path.join(dir, "metrics.json"));
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => tools.get("read").execute("read", { path: file }, controller.signal, undefined, { cwd: dir }),
+    /abort/i
+  );
+  await assert.rejects(
+    () => tools.get("edit").execute("edit", { path: file, edits: [{ startLine: 1, newText: "after" }] }, controller.signal, undefined, { cwd: dir }),
+    /abort/i
+  );
+  assert.equal(await fs.readFile(file, "utf8"), "before\n");
 });

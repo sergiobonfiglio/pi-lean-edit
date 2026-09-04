@@ -101,25 +101,6 @@ test("overlapping or touching failed-edit context windows merge without duplicat
   await expectFile(session, content.replace("17\n18\n", "seventeen\neighteen\n"));
 });
 
-test("line context subsumes nearby column refresh without duplicate output", async () => {
-  const content = Array.from({ length: 15 }, (_, index) => String(index + 1)).join("\n") + "\n";
-  const session = await createSession(content);
-  const input = {
-    path: session.file,
-    edits: [
-      { startLine: 6, newText: "six" },
-      { startLine: 10, startColumn: 1, endColumn: 2, newText: "TEN" }
-    ]
-  };
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, input, session.store));
-  assert.equal(error.refreshedText, Array.from({ length: 11 }, (_, index) => `${index + 1} │ ${index + 1}`).join("\n"));
-  assert.deepEqual(session.store.ranges(session.file), [{ startLine: 1, endLine: 11 }]);
-  assert.deepEqual(session.store.columnRanges(session.file), []);
-
-  await leanEdit(session.dir, input, session.store);
-  await expectFile(session, content.replace("6\n", "six\n").replace("10\n", "TEN\n"));
-});
-
 test("expanded failed-edit context exceeding limits creates no snapshot", async (t) => {
   const content = Array.from({ length: 15 }, (_, index) => String(index + 1)).join("\n") + "\n";
 
@@ -205,6 +186,12 @@ test("duplicate text edits only requested range", async () => {
   await expectFile(session, "same\nkeep\nchanged\n");
 });
 
+test("default helper stores preserve direct read-then-edit compatibility", async () => {
+  const session = await createSession("before\n");
+  await leanRead(session.dir, { path: session.file }, config);
+  await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "after" });
+  await expectFile(session, "after\n");
+});
 test("CRLF preserved", async () => {
   const session = await createSession("a\r\nb\r\nc\r\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
@@ -212,6 +199,16 @@ test("CRLF preserved", async () => {
   await expectFile(session, "a\r\nB\r\nc\r\n");
 });
 
+test("mixed line endings are rejected without changing the file", async () => {
+  const content = "a\r\nb\nc";
+  const session = await createSession(content);
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  await assert.rejects(
+    () => leanEdit(session.dir, { path: session.file, startLine: 3, newText: "C" }, session.store),
+    /mixed line endings/
+  );
+  await expectFile(session, content);
+});
 test("deletion with empty newText", async () => {
   const session = await createSession("a\nb\nc\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
@@ -350,69 +347,6 @@ test("mixed multi-range edit preserves untouched lines before the line-count cha
   await expectFile(session, "1\ntwo\nthree\nFOUR\nFOUR-B\n5\n6\n");
 });
 
-test("same-line-count column edit preserves unaffected rows and refreshes the complete result", async () => {
-  const session = await createSession("abcdef\nsecond\nthird\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "XYZ" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 3, newText: "THIRD" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "QQQ" } }, session.store);
-  await expectFile(session, "aQQQef\nsecond\nTHIRD\n");
-});
-
-test("empty-string column edit refreshes the complete known result", async () => {
-  const session = await createSession("abcdef\nsecond\nthird\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 3, newText: "THIRD" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 2, newText: "Q" } }, session.store);
-  await expectFile(session, "aQf\nsecond\nTHIRD\n");
-});
-
-test("same-line-count mixed full-line and column edits refresh their complete results", async () => {
-  const session = await createSession("abcdef\nsecond\nthird\nfourth\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, startColumn: 2, endColumn: 4, newText: "" },
-      { startLine: 3, newText: "THIRD" }
-    ]
-  } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 4, newText: "FOURTH" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 2, newText: "Q" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 3, newText: "again" } }, session.store);
-  await expectFile(session, "aQf\nsecond\nagain\nFOURTH\n");
-});
-
-test("same-line-count mixed batch preserves later snapshots and refreshes replacements", async () => {
-  const huge = "0123456789ABCDEFGHIJ0123456789";
-  const session = await createSession(`first\nsecond\n${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, limit: 2 }, config, session.store);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 3 }, columnOffset: 6, columnLimit: 3 }, { maxLines: 2000, maxBytes: 12, maxColumns: 3 }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, newText: "FIRST" },
-      { startLine: 2, startColumn: 2, endColumn: 3, newText: "" }
-    ]
-  } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 3, startColumn: 6, endColumn: 7, newText: "xy" } }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, newText: "again" } }, session.store);
-  await expectFile(session, `again\nsond\n01234xy789ABCDEFGHIJ0123456789\n`);
-});
-
-test("line-count-changing mixed batch invalidates later column snapshots", async () => {
-  const huge = "0123456789ABCDEFGHIJ0123456789";
-  const session = await createSession(`first\nsecond\n${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, limit: 2 }, config, session.store);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 3 }, columnOffset: 6, columnLimit: 3 }, { maxLines: 2000, maxBytes: 12, maxColumns: 3 }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, newText: "FIRST\nFIRST-B" },
-      { startLine: 2, startColumn: 2, endColumn: 3, newText: "" }
-    ]
-  } }, session.store);
-  await assert.rejects(() => leanEdit(session.dir, { path: session.file, ...{ startLine: 3, startColumn: 6, endColumn: 7, newText: "xy" } }, session.store), /requested columns are beyond end of line/);
-});
-
 test("multi-range edit rejects overlapping ranges", async () => {
   const session = await createSession("a\nb\nc\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
@@ -422,181 +356,6 @@ test("multi-range edit rejects overlapping ranges", async () => {
       { startLine: 2, endLine: 3, newText: "y" }
     ]
   } }, session.store), /must not overlap/);
-});
-
-test("multi-line read stops at huge line and stores column snapshot", async () => {
-  const huge = "x".repeat(80);
-  const session = await createSession(`one\ntwo\n${huge}\nfour\n`);
-  const result = await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, limit: 4 }, { maxLines: 2000, maxBytes: 35, maxColumns: 6 }, session.store);
-  const text = readText(result);
-  assert.match(text, /1 │ one/);
-  assert.match(text, /2 │ two/);
-  assert.match(text, /3:1-6 │ x{6}/);
-  assert.doesNotMatch(text, /4 │ four/);
-  assert.match(text, /Continue with offset=3 columnOffset=7\./);
-  assert.deepEqual(session.store.ranges(session.file), [{ startLine: 1, endLine: 2 }]);
-  assert.deepEqual(session.store.columnRanges(session.file), [{ line: 3, startColumn: 1, endColumn: 6 }]);
-});
-
-test("huge line continuation reads next column window", async () => {
-  const huge = "abcdefghijklmnopqrstuvwxyz";
-  const session = await createSession(`${huge}\n`);
-  await leanRead(session.dir, { path: session.file }, { maxLines: 2000, maxBytes: 12, maxColumns: 5 }, session.store);
-  const result = await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 5 }, session.store);
-  const text = readText(result);
-  assert.match(text, /1:6-10 │ fghij/);
-  assert.match(text, /Continue with offset=1 columnOffset=11\./);
-});
-
-test("adjacent huge-line column windows compose for spanning edit", async () => {
-  const huge = "0123456789ABCDEFGHIJ0123456789";
-  const session = await createSession(`${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 1, columnLimit: 4 }, { maxLines: 2000, maxBytes: 20, maxColumns: 4 }, session.store);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 4 }, { maxLines: 2000, maxBytes: 20, maxColumns: 4 }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 3, endColumn: 6, newText: "WXYZ" } }, session.store);
-  await expectFile(session, `01WXYZ6789ABCDEFGHIJ0123456789\n`);
-});
-
-test("huge line column edit succeeds after reading target span", async () => {
-  const huge = "0123456789".repeat(10);
-  const session = await createSession(`${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } }, session.store);
-  await expectFile(session, `01234xyz89${"0123456789".repeat(9)}\n`);
-});
-
-test("huge line column edit returns an unread target span before retrying", async () => {
-  const huge = "0123456789ABCDEFGHIJ";
-  const session = await createSession(`${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 1, columnLimit: 4 }, { maxLines: 2000, maxBytes: 50, maxColumns: 4 }, session.store);
-  const input = { path: session.file, startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" };
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, input, session.store));
-  assert.equal(error.refreshedText, "1:6-8 │ 567");
-  await leanEdit(session.dir, input, session.store);
-  await expectFile(session, "01234xyz89ABCDEFGHIJ\n");
-});
-
-test("stale huge-line column edit refreshes the target window", async () => {
-  const huge = "0123456789ABCDEFGHIJ";
-  const session = await createSession(`${huge}\n`);
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
-  await fs.writeFile(session.file, "01234ZZZ89ABCDEFGHIJ\n", "utf8");
-  const input = { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } };
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, input, session.store));
-  assert.equal(error.refreshedText, "1:6-8 │ ZZZ");
-  await leanEdit(session.dir, input, session.store);
-  await expectFile(session, "01234xyz89ABCDEFGHIJ\n");
-});
-
-test("stale huge-line refresh respects the configured column limit", async () => {
-  const session = await createSession("0123456789ABCDEFGHIJ\n");
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
-  await fs.writeFile(session.file, "01234ZZZ89ABCDEFGHIJ\n", "utf8");
-  const input = { path: session.file, ...{ startLine: 1, startColumn: 6, endColumn: 8, newText: "xyz" } };
-  await assert.rejects(
-    () => leanEdit(session.dir, input, session.store, { maxLines: 2000, maxBytes: 50_000, maxColumns: 2 }),
-    /exceeds automatic refresh limits/
-  );
-});
-
-test("normal line column edit succeeds after whole line read", async () => {
-  const session = await createSession("abcdef\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "XYZ" } }, session.store);
-  await expectFile(session, "aXYZef\n");
-});
-
-test("column edit can insert new lines and refreshes invalidated later snapshots", async () => {
-  const session = await createSession("abcdef\nsecond\nthird\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 4, newText: "X\nY" }, session.store);
-  await expectFile(session, "aX\nYef\nsecond\nthird\n");
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, { path: session.file, startLine: 3, newText: "SECOND" }, session.store));
-  assert.equal(error.refreshedText, "1 │ aX\n2 │ Yef\n3 │ second\n4 │ third");
-});
-
-test("stale normal-line column edit refreshes the whole line", async () => {
-  const session = await createSession("abcdef\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await fs.writeFile(session.file, "aBCDef\n", "utf8");
-  const input = { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 4, newText: "XYZ" } };
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, input, session.store));
-  assert.equal(error.refreshedText, "1 │ aBCDef");
-  await leanEdit(session.dir, input, session.store);
-  await expectFile(session, "aXYZef\n");
-});
-test("normal line column edit refreshes insufficient column coverage", async () => {
-  const session = await createSession("abcdef\n");
-  await leanRead(session.dir, { path: session.file, ...{ offset: 1 }, columnOffset: 2, columnLimit: 3 }, { maxLines: 2000, maxBytes: 50, maxColumns: 3 }, session.store);
-  const input = { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "ZZ" };
-  const error = await expectStaleRefresh(() => leanEdit(session.dir, input, session.store));
-  assert.equal(error.refreshedText, "1:2-3 │ bc");
-  await leanEdit(session.dir, input, session.store);
-  await expectFile(session, "aZZdef\n");
-});
-
-test("multiple column edits on same line apply bottom-up", async () => {
-  const session = await createSession("abcdefghij\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, startColumn: 2, endColumn: 3, newText: "XX" },
-      { startLine: 1, startColumn: 7, endColumn: 8, newText: "YY" }
-    ]
-  } }, session.store);
-  await expectFile(session, "aXXdefYYij\n");
-});
-
-test("overlapping column edits reject", async () => {
-  const session = await createSession("abcdefghij\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await assert.rejects(() => leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, startColumn: 2, endColumn: 4, newText: "XX" },
-      { startLine: 1, startColumn: 4, endColumn: 5, newText: "YY" }
-    ]
-  } }, session.store), /must not overlap/);
-});
-
-test("mixing full-line and column edit on same line rejects", async () => {
-  const session = await createSession("abcdefghij\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await assert.rejects(() => leanEdit(session.dir, { path: session.file, ...{
-    edits: [
-      { startLine: 1, newText: "whole" },
-      { startLine: 1, startColumn: 2, endColumn: 3, newText: "XX" }
-    ]
-  } }, session.store), /cannot mix full-line and column edits on same line/);
-});
-
-test("column edit preserves CRLF", async () => {
-  const session = await createSession("abcdef\r\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, ...{ startLine: 1, startColumn: 2, endColumn: 3, newText: "ZZ" } }, session.store);
-  await expectFile(session, "aZZdef\r\n");
-});
-
-test("multiline column edit uses the file's CRLF line ending", async () => {
-  const session = await createSession("abcdef\r\n");
-  await leanRead(session.dir, { path: session.file }, config, session.store);
-  await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "X\nY" }, session.store);
-  await expectFile(session, "aX\r\nYdef\r\n");
-});
-
-test("read does not memorize partial first line as full-line snapshot", async () => {
-  const { dir, file } = await tempFile("abcdef\nnext\n");
-  const store = new SnapshotStore();
-  const result = await leanRead(dir, { path: file }, { maxLines: 2000, maxBytes: 8, maxColumns: 3 }, store);
-  assert.equal(result.details.leanRead?.linesShown, 1);
-  assert.equal(result.details.truncation?.truncatedBy, "columns");
-  assert.equal(result.details.truncation?.firstLineExceedsLimit, true);
-  assert.deepEqual(store.ranges(file), []);
-  assert.deepEqual(store.columnRanges(file), [{ line: 1, startColumn: 1, endColumn: 1 }]);
-  const input = { path: file, startLine: 1, newText: "changed" };
-  const error = await expectStaleRefresh(() => leanEdit(dir, input, store));
-  assert.equal(error.refreshedText, "1 │ abcdef\n2 │ next");
-  await leanEdit(dir, input, store);
-  assert.equal(await fs.readFile(file, "utf8"), "changed\nnext\n");
 });
 
 test("read past EOF does not memorize empty range", async () => {
@@ -666,205 +425,6 @@ test("full-line deletion seeds no phantom row while newline seeds one empty row"
   });
 });
 
-test("complete-line column edits reseed every safely derived result", async (t) => {
-  const cases = [
-    { name: "longer", replacement: "LONG", nextEnd: 5, expected: "aZdef\n" },
-    { name: "shorter", replacement: "Q", nextEnd: 2, expected: "aZdef\n" },
-    { name: "empty", replacement: "", nextEnd: 1, expected: "Zdef\n" }
-  ];
-  for (const item of cases) {
-    await t.test(item.name, async () => {
-      const session = await createSession("abcdef\n");
-      await leanRead(session.dir, { path: session.file }, config, session.store);
-      await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: item.replacement }, session.store);
-      await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: item.replacement ? 2 : 1, endColumn: item.nextEnd, newText: "Z" }, session.store);
-      await expectFile(session, item.expected);
-    });
-  }
-
-  await t.test("multiline and empty interior rows", async () => {
-    const session = await createSession("abcdef\n");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "X\n\nY" }, session.store);
-    assert.deepEqual(session.store.covered(session.file, 2, 2)?.lines, [""]);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, newText: "FIRST" },
-        { startLine: 2, newText: "MIDDLE" },
-        { startLine: 3, newText: "LAST" }
-      ]
-    }, session.store);
-    await expectFile(session, "FIRST\nMIDDLE\nLAST\n");
-  });
-
-  await t.test("multiple edits and Unicode columns", async () => {
-    const session = await createSession("a😀bcdefgh\n");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, startColumn: 2, endColumn: 2, newText: "LONG" },
-        { startLine: 1, startColumn: 7, endColumn: 8, newText: "Q" }
-      ]
-    }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 5, newText: "🙂" }, session.store);
-    await expectFile(session, "a🙂bcdeQh\n");
-  });
-});
-
-test("partial column edits reseed only authored output at shifted coordinates", async (t) => {
-  const huge = "0123456789ABCDEFGHIJ0123456789";
-  const partialConfig = { maxLines: 2000, maxBytes: 20, maxColumns: 8 };
-
-  for (const item of [
-    { name: "equal", replacement: "xyz" },
-    { name: "longer", replacement: "LONG" },
-    { name: "shorter", replacement: "Q" }
-  ]) {
-    await t.test(item.name, async () => {
-      const session = await createSession(`${huge}\n`);
-      await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 5, columnLimit: 8 }, partialConfig, session.store);
-      await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 8, newText: item.replacement }, session.store);
-      await leanEdit(session.dir, {
-        path: session.file,
-        startLine: 1,
-        startColumn: 6,
-        endColumn: 5 + Array.from(item.replacement).length,
-        newText: "Z"
-      }, session.store);
-      await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 5, endColumn: 5, newText: "P" }, session.store), StaleEditError);
-    });
-  }
-
-  await t.test("empty replacement adds no partial seed", async () => {
-    const session = await createSession(`${huge}\n`);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 5, columnLimit: 8 }, partialConfig, session.store);
-    const revision = session.store.revision(session.file);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 8, newText: "" }, session.store);
-    assert.ok(session.store.revision(session.file) > revision);
-    assert.deepEqual(session.store.columnRanges(session.file), []);
-    await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 6, newText: "Z" }, session.store), StaleEditError);
-  });
-
-  await t.test("empty replacement-only interior row is fully known", async () => {
-    const session = await createSession(`${huge}\n`);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 5, columnLimit: 8 }, partialConfig, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 8, newText: "X\n\nY" }, session.store);
-    assert.deepEqual(session.store.covered(session.file, 2, 2)?.lines, [""]);
-    await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "middle" }, session.store);
-  });
-  await t.test("multiple same-line edits with changed lengths", async () => {
-    const session = await createSession(`${huge}\n`);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 3, columnLimit: 2 }, partialConfig, session.store);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 8, columnLimit: 2 }, partialConfig, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, startColumn: 3, endColumn: 4, newText: "LONG" },
-        { startLine: 1, startColumn: 8, endColumn: 9, newText: "Q" }
-      ]
-    }, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, startColumn: 3, endColumn: 6, newText: "X" },
-        { startLine: 1, startColumn: 10, endColumn: 10, newText: "Y" }
-      ]
-    }, session.store);
-  });
-
-  await t.test("multiline boundaries, interior, and later same-source edit", async () => {
-    const session = await createSession(`${huge}\n`);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 3, columnLimit: 2 }, partialConfig, session.store);
-    await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 8, columnLimit: 2 }, partialConfig, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, startColumn: 3, endColumn: 4, newText: "A\nMID\nZ" },
-        { startLine: 1, startColumn: 8, endColumn: 9, newText: "Q" }
-      ]
-    }, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, startColumn: 3, endColumn: 3, newText: "B" },
-        { startLine: 2, newText: "INNER" },
-        { startLine: 3, startColumn: 1, endColumn: 1, newText: "Y" },
-        { startLine: 3, startColumn: 5, endColumn: 5, newText: "R" }
-      ]
-    }, session.store);
-    await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 3, startColumn: 2, endColumn: 2, newText: "hidden" }, session.store), StaleEditError);
-  });
-});
-
-test("earlier insertion and deletion do not prevent later outputs from being reseeded", async (t) => {
-  await t.test("insertion before partial column output", async () => {
-    const huge = "0123456789ABCDEFGHIJ0123456789";
-    const session = await createSession(`top\n${huge}\n`);
-    await leanRead(session.dir, { path: session.file, offset: 1, limit: 1 }, config, session.store);
-    await leanRead(session.dir, { path: session.file, offset: 2, columnOffset: 5, columnLimit: 6 }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 }, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, newText: "TOP\nMORE" },
-        { startLine: 2, startColumn: 6, endColumn: 8, newText: "XYZ" }
-      ]
-    }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 3, startColumn: 6, endColumn: 8, newText: "Q" }, session.store);
-  });
-
-  await t.test("deletion before full-line output", async () => {
-    const session = await createSession("first\nsecond\nthird\n");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, {
-      path: session.file,
-      edits: [
-        { startLine: 1, newText: "" },
-        { startLine: 3, newText: "THIRD" }
-      ]
-    }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "three" }, session.store);
-    await expectFile(session, "second\nthree\n");
-  });
-});
-
-test("column newline normalization and final-newline state match reseeded text", async (t) => {
-  await t.test("CRLF and lone CR replacement", async () => {
-    const session = await createSession("abcdef\r\nnext\r\n");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "X\rY" }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 2, newText: "SECOND" }, session.store);
-    await expectFile(session, "aX\r\nSECOND\r\nnext\r\n");
-  });
-
-  await t.test("file without final newline", async () => {
-    const session = await createSession("abcdef");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "XYZ" }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 4, newText: "Q" }, session.store);
-    await expectFile(session, "aQdef");
-  });
-
-  await t.test("terminal newline from a column replacement", async () => {
-    const session = await createSession("abc");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 2, endColumn: 3, newText: "X\n" }, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "done" }, session.store);
-    await expectFile(session, "done\n");
-  });
-
-  await t.test("terminal newline replacing the only full line", async () => {
-    const session = await createSession("a");
-    await leanRead(session.dir, { path: session.file }, config, session.store);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "\n" }, session.store);
-    await expectFile(session, "\n");
-    assert.deepEqual(session.store.covered(session.file, 1, 1)?.lines, [""]);
-    await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "filled" }, session.store);
-    await expectFile(session, "filled\n");
-  });
-});
-
 test("external mutation of freshly seeded text is stale and refreshes it", async () => {
   const session = await createSession("before\n");
   await leanRead(session.dir, { path: session.file }, config, session.store);
@@ -887,13 +447,4 @@ test("net-zero batches still invalidate old suffix coverage and reseed later out
   await leanEdit(session.dir, { path: session.file, startLine: 4, newText: "TAIL" }, session.store);
   await assert.rejects(() => leanEdit(session.dir, { path: session.file, startLine: 3, newText: "TWO" }, session.store), StaleEditError);
   await expectFile(session, "one\nextra\n2\nTAIL\n");
-});
-
-test("partial column seeds use Unicode code-point coordinates", async () => {
-  const session = await createSession(`${"😀".repeat(30)}\n`);
-  const partialConfig = { maxLines: 2000, maxBytes: 50, maxColumns: 4 };
-  await leanRead(session.dir, { path: session.file, offset: 1, columnOffset: 5, columnLimit: 4 }, partialConfig, session.store);
-  await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 7, newText: "a🙂b" }, session.store);
-  await leanEdit(session.dir, { path: session.file, startLine: 1, startColumn: 6, endColumn: 8, newText: "Z" }, session.store);
-  await expectFile(session, `${"😀".repeat(5)}Z${"😀".repeat(23)}\n`);
 });

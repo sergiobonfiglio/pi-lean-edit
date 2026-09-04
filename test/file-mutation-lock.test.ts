@@ -91,3 +91,39 @@ test("reclaims a stale lock left by a crashed process", async () => {
   await withInterprocessFileMutationLock(file, async () => {});
   await assert.rejects(() => fs.stat(staleLock), { code: "ENOENT" });
 });
+
+test("aborts while waiting for a held lock", async () => {
+  const { file } = await target();
+  let releaseHolder!: () => void;
+  let entered!: () => void;
+  const holderRelease = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  const holderEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const holder = withInterprocessFileMutationLock(file, async () => { entered(); await holderRelease; });
+  await holderEntered;
+
+  const controller = new AbortController();
+  let waiterRan = false;
+  const waiter = withInterprocessFileMutationLock(file, async () => { waiterRan = true; }, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(() => waiter, (error: any) => error?.name === "AbortError");
+  assert.equal(waiterRan, false);
+  releaseHolder();
+  await holder;
+});
+
+test("reports lock cleanup failure as a warning after a successful mutation", async () => {
+  const { file } = await target();
+  let cleanupError: unknown;
+  const value = await withInterprocessFileMutationLock(
+    file,
+    async () => {
+      await fs.writeFile(file, "committed", "utf8");
+      return "committed";
+    },
+    { onCleanupError: (error) => { cleanupError = error; } },
+    { lock: (async () => async () => { throw new Error("release failed"); }) as any }
+  );
+  assert.equal(value, "committed");
+  assert.equal(await fs.readFile(file, "utf8"), "committed");
+  assert.match(String(cleanupError), /release failed/);
+});

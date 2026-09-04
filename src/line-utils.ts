@@ -41,6 +41,17 @@ export function splitText(text: string): SplitText {
   return { lines, lineEnding, finalNewline };
 }
 
+export function hasMixedLineEndings(text: string): boolean {
+  let sawLf = false;
+  let sawCrlf = false;
+  for (let index = 0; index < text.length; index++) {
+    if (text[index] !== "\n") continue;
+    if (index > 0 && text[index - 1] === "\r") sawCrlf = true;
+    else sawLf = true;
+    if (sawLf && sawCrlf) return true;
+  }
+  return false;
+}
 export function replacementLines(newText: string): string[] {
   if (newText.length === 0) return [];
   const lines = newText.replace(/\r\n/g, "\n").split("\n");
@@ -61,9 +72,6 @@ export function rangeText(lines: string[], startLine: number, endLine: number, l
   return sliceRange(lines, startLine, endLine).join(lineEnding);
 }
 
-export function lineCount(text: string): number {
-  return splitText(text).lines.length;
-}
 
 export function formatNumberedLines(lines: string[], startLine: number): string {
   return lines.map((line, i) => `${startLine + i} │ ${line}`).join("\n");

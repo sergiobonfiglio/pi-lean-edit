@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
 import { resolveCanonicalPath } from "./line-utils.ts";
 export type LeanEditCounters = {
@@ -23,37 +22,30 @@ export type LeanEditMetricsSnapshot = {
   global: LeanEditSnapshotTotals;
 };
 
-export type LeanEditDelta = {
-  attempts: number;
-  failures: number;
-  charsSaved: number;
-  charsNormalEdit: number;
-  charsLeanEdit: number;
-};
+export type LeanEditDelta = LeanEditCounters;
 
 const ZERO: LeanEditCounters = Object.freeze({ attempts: 0, failures: 0, charsSaved: 0, charsNormalEdit: 0, charsLeanEdit: 0 });
 
 export function defaultMetricsPath(): string {
-  return process.env.PI_LEAN_EDIT_METRICS_PATH || path.join(os.homedir(), ".pi", "agent", "pi-lean-edit", "metrics.json");
+  return process.env.PI_LEAN_EDIT_METRICS_PATH || path.join(getAgentDir(), "pi-lean-edit", "metrics.json");
 }
 
 function clone(counters: LeanEditCounters): LeanEditCounters {
-  return {
-    attempts: counters.attempts,
-    failures: counters.failures,
-    charsSaved: counters.charsSaved,
-    charsNormalEdit: counters.charsNormalEdit,
-    charsLeanEdit: counters.charsLeanEdit
-  };
+  return { ...counters };
+}
+
+function nonNegativeFinite(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? Math.max(0, number) : 0;
 }
 
 function add(target: LeanEditCounters, delta: Partial<LeanEditDelta> | undefined): void {
   if (!delta) return;
-  target.attempts += Math.max(0, Number(delta.attempts ?? 0));
-  target.failures += Math.max(0, Number(delta.failures ?? 0));
-  target.charsSaved += Math.max(0, Number(delta.charsSaved ?? 0));
-  target.charsNormalEdit += Math.max(0, Number(delta.charsNormalEdit ?? 0));
-  target.charsLeanEdit += Math.max(0, Number(delta.charsLeanEdit ?? 0));
+  target.attempts += nonNegativeFinite(delta.attempts);
+  target.failures += nonNegativeFinite(delta.failures);
+  target.charsSaved += nonNegativeFinite(delta.charsSaved);
+  target.charsNormalEdit += nonNegativeFinite(delta.charsNormalEdit);
+  target.charsLeanEdit += nonNegativeFinite(delta.charsLeanEdit);
 }
 
 function snapshotTotals(counters: LeanEditCounters): LeanEditSnapshotTotals {
@@ -66,12 +58,6 @@ function snapshotTotals(counters: LeanEditCounters): LeanEditSnapshotTotals {
   };
 }
 
-export function successDelta(oldText: string, newText: string, startLine: number, endLine: number): LeanEditDelta {
-  const charsNormalEdit = oldText.length + newText.length;
-  const charsLeanEdit = String(startLine).length + String(endLine).length + newText.length;
-  const charsSaved = Math.max(0, charsNormalEdit - charsLeanEdit);
-  return { attempts: 1, failures: 0, charsSaved, charsNormalEdit, charsLeanEdit };
-}
 
 export function failureDelta(): LeanEditDelta {
   return { attempts: 1, failures: 1, charsSaved: 0, charsNormalEdit: 0, charsLeanEdit: 0 };
@@ -79,13 +65,13 @@ export function failureDelta(): LeanEditDelta {
 
 export function getLeanEditDelta(details: any, toolName?: string): LeanEditDelta {
   const delta = details?.leanEditMetrics?.delta;
-  if (!delta && toolName !== "edit") return { ...ZERO };
+  if (!delta && toolName !== "edit" && toolName !== "edit_huge_line") return { ...ZERO };
   return {
-    attempts: Math.max(0, Number(delta?.attempts ?? 0)),
-    failures: Math.max(0, Number(delta?.failures ?? 0)),
-    charsSaved: Math.max(0, Number(delta?.charsSaved ?? 0)),
-    charsNormalEdit: Math.max(0, Number(delta?.charsNormalEdit ?? 0)),
-    charsLeanEdit: Math.max(0, Number(delta?.charsLeanEdit ?? 0))
+    attempts: nonNegativeFinite(delta?.attempts),
+    failures: nonNegativeFinite(delta?.failures),
+    charsSaved: nonNegativeFinite(delta?.charsSaved),
+    charsNormalEdit: nonNegativeFinite(delta?.charsNormalEdit),
+    charsLeanEdit: nonNegativeFinite(delta?.charsLeanEdit)
   };
 }
 
@@ -93,11 +79,11 @@ async function readCounters(metricsPath: string): Promise<LeanEditCounters> {
   try {
     const raw = JSON.parse(await fs.readFile(metricsPath, "utf8"));
     return {
-      attempts: Math.max(0, Number(raw?.attempts ?? 0)),
-      failures: Math.max(0, Number(raw?.failures ?? 0)),
-      charsSaved: Math.max(0, Number(raw?.charsSaved ?? 0)),
-      charsNormalEdit: Math.max(0, Number(raw?.charsNormalEdit ?? 0)),
-      charsLeanEdit: Math.max(0, Number(raw?.charsLeanEdit ?? 0))
+      attempts: nonNegativeFinite(raw?.attempts),
+      failures: nonNegativeFinite(raw?.failures),
+      charsSaved: nonNegativeFinite(raw?.charsSaved),
+      charsNormalEdit: nonNegativeFinite(raw?.charsNormalEdit),
+      charsLeanEdit: nonNegativeFinite(raw?.charsLeanEdit)
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return clone(ZERO);
@@ -138,7 +124,7 @@ export class LeanEditMetricsStore {
 
   async record(delta: LeanEditDelta): Promise<LeanEditMetricsSnapshot> {
     add(this.sessionCounters, delta);
-    this.writeQueue = this.writeQueue.then(async () => {
+    const operation = this.writeQueue.then(async () => {
       const canonicalPath = await resolveCanonicalPath(process.cwd(), this.metricsPath);
       this.globalCounters = await withInterprocessFileMutationLock(canonicalPath, () => withFileMutationQueue(canonicalPath, async () => {
         const totals = await readCounters(canonicalPath);
@@ -147,7 +133,8 @@ export class LeanEditMetricsStore {
         return totals;
       }));
     });
-    await this.writeQueue;
+    this.writeQueue = operation.catch(() => undefined);
+    await operation;
     return this.snapshot();
   }
 

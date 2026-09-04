@@ -1,16 +1,14 @@
 import { promises as fs } from "node:fs";
 import { formatDimensionNote, resizeImage } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { codePointLength, formatColumnLine, formatNumberedLines, isBinary, resolveCanonicalPath, sliceColumns, splitText } from "./line-utils.ts";
-import { type SnapshotStore, snapshotStore } from "./snapshot-store.ts";
+import { formatNumberedLines, isBinary, resolveCanonicalPath, splitText } from "./line-utils.ts";
+import { SnapshotStore, snapshotStore } from "./snapshot-store.ts";
 
 export const leanReadSchema = Type.Object({
   path: Type.String({ description: "Required. Path to the file to read (relative or absolute)." }),
   offset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed line at which to start reading." })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum number of lines to read." })),
-  columnOffset: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. 1-indexed column at which to start a single-line window; use only for huge lines." })),
-  columnLimit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum columns in a single-line window. Use only with columnOffset." }))
-});
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Optional. Maximum number of lines to read." }))
+}, { additionalProperties: false });
 export type LeanReadInput = Static<typeof leanReadSchema>;
 
 export type LeanReadConfig = {
@@ -57,7 +55,6 @@ export type LeanReadResult = {
   };
 };
 
-const DEFAULT_MAX_COLUMNS = 400;
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const n = value ?? fallback;
@@ -65,44 +62,9 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return n;
 }
 
-function effectiveMaxColumns(config: LeanReadConfig, inputLimit?: number): number {
-  const configured = positiveInteger(config.maxColumns, DEFAULT_MAX_COLUMNS, "maxColumns");
-  return Math.min(configured, positiveInteger(inputLimit, configured, "columnLimit"));
-}
 
-function fullLineBytes(lineNumber: number, line: string): number {
-  return Buffer.byteLength(`${lineNumber} │ ${line}`, "utf8");
-}
-
-function fitColumnWindow(lineNumber: number, line: string, startColumn: number, maxColumns: number, byteBudget: number): { endColumn: number; text: string } {
-  const lineLength = codePointLength(line);
-  if (startColumn > lineLength) throw new Error(`columnOffset ${startColumn} exceeds line ${lineNumber} length ${lineLength}`);
-  const maxTake = Math.min(maxColumns, lineLength - startColumn + 1);
-  let bestEnd = startColumn;
-  let bestText = "";
-  for (let take = 1; take <= maxTake; take++) {
-    const endColumn = startColumn + take - 1;
-    const text = sliceColumns(line, startColumn, endColumn);
-    const rendered = formatColumnLine(lineNumber, startColumn, endColumn, text);
-    if (Buffer.byteLength(rendered, "utf8") > byteBudget) break;
-    bestEnd = endColumn;
-    bestText = text;
-  }
-  if (bestText.length === "".length) {
-    const text = sliceColumns(line, startColumn, startColumn);
-    return { endColumn: startColumn, text };
-  }
-  return { endColumn: bestEnd, text: bestText };
-}
-
-function renderSummary(startLine: number, endLine: number, totalLines: number, truncated: boolean, startColumn?: number, endColumn?: number): string {
-  const range = startColumn != null && endColumn != null && startLine === endLine
-    ? `${startLine}:${startColumn}-${endColumn}`
-    : startColumn != null && endColumn != null
-      ? `${startLine}-${endLine}:${endColumn}`
-      : startLine <= endLine
-        ? `${startLine}-${endLine}`
-        : "0-0";
+function renderSummary(startLine: number, endLine: number, totalLines: number, truncated: boolean): string {
+  const range = startLine <= endLine ? `${startLine}-${endLine}` : "0-0";
   return `Showing lines ${range} of ${totalLines}${truncated ? " (truncated)" : ""}.`;
 }
 
@@ -182,57 +144,44 @@ function imageReadResult(text: string, image?: { data: string; mimeType: string 
   };
 }
 
-function readNormalizationWarning(input: LeanReadInput): string | undefined {
-  if (input.columnOffset == null || input.limit == null || input.limit <= 1) return undefined;
-  const ignored = input.columnLimit == null
-    ? `columnOffset=${input.columnOffset}`
-    : `columnOffset=${input.columnOffset} and columnLimit=${input.columnLimit}`;
-  return `Warning: Ignored ${ignored} because column windows support only one line while limit=${input.limit} requests multiple lines.`;
-}
-
-function appendReadWarning(result: LeanReadResult, warning: string | undefined): LeanReadResult {
-  if (!warning) return result;
-  const content = result.content.find((item): item is Extract<LeanReadContent, { type: "text" }> => item.type === "text");
-  if (!content) return result;
-  content.text = `${content.text}\n${warning}`;
-  const truncation = result.details.truncation;
-  if (truncation) {
-    truncation.content = content.text;
-    truncation.outputLines = content.text.split("\n").length;
-    truncation.outputBytes = Buffer.byteLength(content.text, "utf8");
-  }
-  return result;
-}
-export async function leanRead(cwd: string, input: LeanReadInput, config: LeanReadConfig, store: SnapshotStore = snapshotStore, model?: { input?: string[] }, deps: LeanReadDeps = {}): Promise<LeanReadResult> {
-  const normalizationWarning = readNormalizationWarning(input);
-  const columnOffset = normalizationWarning ? undefined : input.columnOffset;
-  const columnLimit = normalizationWarning ? undefined : input.columnLimit;
+export async function leanRead(
+  cwd: string,
+  input: LeanReadInput,
+  config: LeanReadConfig,
+  store: SnapshotStore = snapshotStore,
+  model?: { input?: string[] },
+  deps: LeanReadDeps = {},
+  signal?: AbortSignal
+): Promise<LeanReadResult> {
+  signal?.throwIfAborted();
   const full = await resolveCanonicalPath(cwd, input.path);
+  signal?.throwIfAborted();
   const st = await fs.stat(full);
   if (st.isDirectory()) throw new Error(`Cannot read directory: ${input.path}`);
 
-  const buf = await fs.readFile(full);
+  const buf = await fs.readFile(full, { signal });
   const imageMimeType = detectSupportedImageMimeType(buf);
   const nonVisionImageNote = getNonVisionImageNote(model);
   if (imageMimeType) {
     if (config.autoResizeImages ?? true) {
       const resized = await (deps.resizeImageFn ?? resizeImage)(buf, imageMimeType);
+      signal?.throwIfAborted();
       if (!resized) {
-        return appendReadWarning(imageReadResult(buildImageReadText(imageMimeType, [
+        return imageReadResult(buildImageReadText(imageMimeType, [
           "[Image omitted: could not be resized below the inline image size limit.]",
           nonVisionImageNote
-        ])), normalizationWarning);
+        ]));
       }
-      return appendReadWarning(imageReadResult(
+      return imageReadResult(
         buildImageReadText(resized.mimeType, [formatDimensionNote(resized), nonVisionImageNote]),
         { data: resized.data, mimeType: resized.mimeType }
-      ), normalizationWarning);
+      );
     }
 
-    return appendReadWarning(imageReadResult(
+    return imageReadResult(
       buildImageReadText(imageMimeType, [nonVisionImageNote]),
       { data: buf.toString("base64"), mimeType: imageMimeType }
-    ), normalizationWarning);
+    );
   }
 
   if (isBinary(buf)) throw new Error("lean read supports text only, except supported images");
@@ -242,120 +191,33 @@ export async function leanRead(cwd: string, input: LeanReadInput, config: LeanRe
   const startLine = positiveInteger(input.offset, 1, "offset");
   const requestedLimit = positiveInteger(input.limit, config.maxLines, "limit");
   const limit = Math.min(requestedLimit, config.maxLines);
-  const maxColumns = effectiveMaxColumns(config, columnLimit);
-
-  if (columnOffset != null) {
-    if (startLine > parsed.lines.length) {
-      const out = renderSummary(startLine, startLine - 1, parsed.lines.length, false);
-      return appendReadWarning({
-        content: [{ type: "text", text: out }],
-        details: {
-          leanRead: { path: input.path, startLine, endLine: startLine - 1, linesShown: 0, totalLines: parsed.lines.length, truncated: false },
-          truncation: {
-            content: out,
-            truncated: false,
-            truncatedBy: null,
-            totalLines: parsed.lines.length,
-            totalBytes: buf.length,
-            outputLines: out.length ? out.split("\n").length : 0,
-            outputBytes: Buffer.byteLength(out, "utf8"),
-            lastLinePartial: false,
-            firstLineExceedsLimit: false,
-            maxLines: config.maxLines,
-            maxBytes: config.maxBytes
-          }
-        }
-      }, normalizationWarning);
-    }
-
-    const line = parsed.lines[startLine - 1]!;
-    const lineLength = codePointLength(line);
-    const startColumn = positiveInteger(columnOffset, 1, "columnOffset");
-    const { endColumn, text: windowText } = fitColumnWindow(startLine, line, startColumn, maxColumns, config.maxBytes);
-    const truncated = endColumn < lineLength;
-    const hugeLine = fullLineBytes(startLine, line) > config.maxBytes;
-    store.setColumns({
-      path: full,
-      readAt: Date.now(),
-      line: startLine,
-      startColumn,
-      endColumn,
-      text: windowText,
-      lineLength,
-      lineEnding: parsed.lineEnding,
-      editEligible: hugeLine
-    });
-
-    const numbered = formatColumnLine(startLine, startColumn, endColumn, windowText);
-    const summary = renderSummary(startLine, startLine, parsed.lines.length, truncated, startColumn, endColumn);
-    const next = truncated ? `Continue with offset=${startLine} columnOffset=${endColumn + 1}.` : "";
-    const out = [numbered, summary, next].filter(Boolean).join("\n");
-    return appendReadWarning({
-      content: [{ type: "text", text: out }],
-      details: {
-        leanRead: { path: input.path, startLine, endLine: startLine, linesShown: 1, totalLines: parsed.lines.length, truncated, startColumn, endColumn },
-        truncation: {
-          content: out,
-          truncated,
-          truncatedBy: truncated ? "columns" : null,
-          totalLines: parsed.lines.length,
-          totalBytes: buf.length,
-          outputLines: out.length ? out.split("\n").length : 0,
-          outputBytes: Buffer.byteLength(out, "utf8"),
-          lastLinePartial: truncated,
-          firstLineExceedsLimit: hugeLine,
-          maxLines: config.maxLines,
-          maxBytes: config.maxBytes
-        }
-      }
-    }, normalizationWarning);
-  }
-
   const shown: string[] = [];
   let bytesUsed = 0;
   let truncatedBy: "lines" | "bytes" | "columns" | null = null;
-  let hugeLineInfo: { lineNumber: number; startColumn: number; endColumn: number; text: string; lineLength: number } | undefined;
+  let hugeLine: number | undefined;
 
   for (let i = 0; i < limit && startLine + i <= parsed.lines.length; i++) {
     const lineNumber = startLine + i;
     const line = parsed.lines[lineNumber - 1]!;
     const rendered = `${lineNumber} │ ${line}`;
     const lineBytes = Buffer.byteLength(shown.length === 0 ? rendered : `\n${rendered}`, "utf8");
-    const lineIsHuge = fullLineBytes(lineNumber, line) > config.maxBytes;
-
-    if (lineIsHuge) {
-      const byteBudget = Math.max(1, config.maxBytes - bytesUsed);
-      const lineLength = codePointLength(line);
-      const { endColumn, text: windowText } = fitColumnWindow(lineNumber, line, 1, maxColumns, byteBudget);
-      hugeLineInfo = { lineNumber, startColumn: 1, endColumn, text: windowText, lineLength };
-      store.setColumns({
-        path: full,
-        readAt: Date.now(),
-        line: lineNumber,
-        startColumn: 1,
-        endColumn,
-        text: windowText,
-        lineLength,
-        lineEnding: parsed.lineEnding,
-        editEligible: true
-      });
-      truncatedBy = "columns";
+    if (Buffer.byteLength(rendered, "utf8") > config.maxBytes) {
+      hugeLine = lineNumber;
+      truncatedBy = "bytes";
       break;
     }
-
     if (bytesUsed + lineBytes > config.maxBytes) {
       truncatedBy = "bytes";
       break;
     }
-
     shown.push(line);
     bytesUsed += lineBytes;
   }
 
+  signal?.throwIfAborted();
   if (shown.length > 0) {
     store.set({
       path: full,
-      readAt: Date.now(),
       startLine,
       endLine: startLine + shown.length - 1,
       lines: shown,
@@ -363,37 +225,30 @@ export async function leanRead(cwd: string, input: LeanReadInput, config: LeanRe
     });
   }
 
-  const exhaustedRequestedLines = shown.length === limit && !hugeLineInfo;
+  const exhaustedRequestedLines = shown.length === limit;
   const reachedEOF = startLine + shown.length > parsed.lines.length;
   const truncated = truncatedBy != null || (!reachedEOF && !exhaustedRequestedLines && startLine <= parsed.lines.length + 1) || (exhaustedRequestedLines && startLine + shown.length - 1 < parsed.lines.length);
   if (truncatedBy == null && exhaustedRequestedLines && startLine + shown.length - 1 < parsed.lines.length) truncatedBy = "lines";
 
-  const numberedLines = shown.length > 0 ? formatNumberedLines(shown, startLine) : "";
-  const hugeRendered = hugeLineInfo ? formatColumnLine(hugeLineInfo.lineNumber, hugeLineInfo.startColumn, hugeLineInfo.endColumn, hugeLineInfo.text) : "";
-  const endLine = hugeLineInfo ? hugeLineInfo.lineNumber : shown.length === 0 ? startLine - 1 : startLine + shown.length - 1;
-  const summary = hugeLineInfo
-    ? renderSummary(startLine, hugeLineInfo.lineNumber, parsed.lines.length, true, hugeLineInfo.startColumn, hugeLineInfo.endColumn)
-    : renderSummary(startLine, endLine, parsed.lines.length, truncated);
-  const next = hugeLineInfo
-    ? `Continue with offset=${hugeLineInfo.lineNumber} columnOffset=${hugeLineInfo.endColumn + 1}.`
+  const endLine = shown.length === 0 ? startLine - 1 : startLine + shown.length - 1;
+  const summary = renderSummary(startLine, endLine, parsed.lines.length, truncated);
+  const next = hugeLine != null
+    ? `Line ${hugeLine} exceeds the read byte limit. Use read_huge_line with line=${hugeLine} and columnOffset=1.`
     : truncated
       ? `Continue with offset=${endLine + 1}.`
       : "";
-  const out = [numberedLines, hugeRendered, summary, next].filter(Boolean).join("\n");
-  const outputBytes = Buffer.byteLength(out, "utf8");
+  const out = [formatNumberedLines(shown, startLine), summary, next].filter(Boolean).join("\n");
 
-  return appendReadWarning({
+  return {
     content: [{ type: "text", text: out }],
     details: {
       leanRead: {
         path: input.path,
         startLine,
         endLine,
-        linesShown: shown.length + (hugeLineInfo ? 1 : 0),
+        linesShown: shown.length,
         totalLines: parsed.lines.length,
-        truncated,
-        startColumn: hugeLineInfo?.startColumn,
-        endColumn: hugeLineInfo?.endColumn
+        truncated
       },
       truncation: {
         content: out,
@@ -402,12 +257,12 @@ export async function leanRead(cwd: string, input: LeanReadInput, config: LeanRe
         totalLines: parsed.lines.length,
         totalBytes: buf.length,
         outputLines: out.length ? out.split("\n").length : 0,
-        outputBytes,
-        lastLinePartial: Boolean(hugeLineInfo),
-        firstLineExceedsLimit: Boolean(hugeLineInfo && hugeLineInfo.lineNumber === startLine && shown.length === 0),
+        outputBytes: Buffer.byteLength(out, "utf8"),
+        lastLinePartial: false,
+        firstLineExceedsLimit: hugeLine === startLine,
         maxLines: config.maxLines,
         maxBytes: config.maxBytes
       }
     }
-  }, normalizationWarning);
+  };
 }

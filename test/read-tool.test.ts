@@ -12,16 +12,6 @@ async function tempFile(name: string, content: Buffer): Promise<{ dir: string; f
   return { dir, file: await fs.realpath(file) };
 }
 
-test("read schema requires only path and labels all range fields optional", () => {
-  const schema = leanReadSchema as unknown as {
-    required: string[];
-    properties: Record<string, { description: string }>;
-  };
-  assert.deepEqual(schema.required, ["path"]);
-  for (const field of ["offset", "limit", "columnOffset", "columnLimit"]) {
-    assert.match(schema.properties[field]!.description, /^Optional\./);
-  }
-});
 test("supported images are returned as image attachments", async () => {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+y3ioAAAAASUVORK5CYII=", "base64");
   const { dir, file } = await tempFile("tiny.png", png);
@@ -83,60 +73,31 @@ test("non-image binary files are still rejected", async () => {
   await assert.rejects(() => leanRead(dir, { path: file }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 }), /supports text only, except supported images/);
 });
 
-test("multi-line reads ignore supplied column window parameters with a warning", async () => {
-  const { dir, file } = await tempFile("mixed-range.txt", Buffer.from("alpha\nbravo\ncharlie\ndelta\n", "utf8"));
-  const result = await leanRead(dir, {
-    path: file,
-    offset: 1,
-    limit: 3,
-    columnOffset: 2,
-    columnLimit: 4
-  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
-  const content = result.content[0];
 
-  assert.equal(content?.type, "text");
-  if (content?.type !== "text") return;
-  assert.match(content.text, /^1 │ alpha\n2 │ bravo\n3 │ charlie\n/);
-  assert.match(content.text, /Warning: Ignored columnOffset=2 and columnLimit=4 because column windows support only one line while limit=3 requests multiple lines\.$/);
-  assert.equal(result.details.leanRead?.startLine, 1);
-  assert.equal(result.details.leanRead?.endLine, 3);
-  assert.equal(result.details.leanRead?.startColumn, undefined);
-  assert.equal(result.details.leanRead?.endColumn, undefined);
-  assert.equal(result.details.truncation?.content, content.text);
+test("read schema exposes only normal line-range fields", () => {
+  const schema = leanReadSchema as unknown as { required: string[]; properties: Record<string, unknown> };
+  assert.deepEqual(schema.required, ["path"]);
+  assert.deepEqual(Object.keys(schema.properties), ["path", "offset", "limit"]);
 });
 
-test("multi-line normalization only names columnOffset when columnLimit is absent", async () => {
-  const { dir, file } = await tempFile("mixed-offset.txt", Buffer.from("one\ntwo\nthree\n", "utf8"));
-  const result = await leanRead(dir, {
-    path: file,
-    offset: 1,
-    limit: 2,
-    columnOffset: 99
-  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
+test("normal read stops before a huge line without snapshotting a partial line", async () => {
+  const { dir, file } = await tempFile("huge.txt", Buffer.from(`one\n${"x".repeat(80)}\nthree\n`, "utf8"));
+  const result = await leanRead(dir, { path: file }, { maxLines: 2000, maxBytes: 20, maxColumns: 6 });
   const content = result.content[0];
-
   assert.equal(content?.type, "text");
   if (content?.type !== "text") return;
-  assert.match(content.text, /^1 │ one\n2 │ two\n/);
-  assert.match(content.text, /Warning: Ignored columnOffset=99 because column windows support only one line while limit=2 requests multiple lines\.$/);
-  assert.doesNotMatch(content.text, /columnLimit/);
+  assert.match(content.text, /1 │ one/);
+  assert.match(content.text, /Line 2 exceeds the read byte limit\. Use read_huge_line/);
+  assert.doesNotMatch(content.text, /x{6}/);
+  assert.equal(result.details.truncation?.firstLineExceedsLimit, false);
 });
 
-test("valid single-line column reads remain column windows", async () => {
-  const { dir, file } = await tempFile("column-window.txt", Buffer.from("alpha\nbravo\ncharlie\n", "utf8"));
-  const result = await leanRead(dir, {
-    path: file,
-    offset: 2,
-    limit: 1,
-    columnOffset: 2,
-    columnLimit: 3
-  }, { maxLines: 2000, maxBytes: 50_000, maxColumns: 400 });
-  const content = result.content[0];
-
-  assert.equal(content?.type, "text");
-  if (content?.type !== "text") return;
-  assert.match(content.text, /^2:2-4 │ rav\nShowing lines 2:2-4 of 3 \(truncated\)\./);
-  assert.doesNotMatch(content.text, /Warning:/);
-  assert.equal(result.details.leanRead?.startColumn, 2);
-  assert.equal(result.details.leanRead?.endColumn, 4);
+test("aborted read does not create a snapshot", async () => {
+  const { dir, file } = await tempFile("abort.txt", Buffer.from("text\n", "utf8"));
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => leanRead(dir, { path: file }, { maxLines: 2000, maxBytes: 50_000 }, undefined, undefined, {}, controller.signal),
+    (error: any) => error?.name === "AbortError"
+  );
 });

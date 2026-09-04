@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { failureDelta, formatLeanEditStats, LeanEditMetricsStore, successDelta } from "../src/metrics.ts";
+import { defaultMetricsPath, failureDelta, formatLeanEditStats, LeanEditMetricsStore } from "../src/metrics.ts";
 
 test("failure metrics increment", async () => {
   const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
@@ -19,7 +19,7 @@ test("saved-character metrics increment on success", async () => {
   const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const store = new LeanEditMetricsStore(metricsPath);
   await store.loadGlobal();
-  const snapshot = await store.record(successDelta("old text", "new", 10, 12));
+  const snapshot = await store.record({ attempts: 1, failures: 0, charsNormalEdit: 11, charsLeanEdit: 7, charsSaved: 4 });
   assert.equal(snapshot.session.attempts, 1);
   assert.equal(snapshot.session.failures, 0);
   assert.equal(snapshot.session.charsNormalEdit, 11);
@@ -43,7 +43,7 @@ test("global metrics persist across extension reload", async () => {
   const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
   const first = new LeanEditMetricsStore(metricsPath);
   await first.loadGlobal();
-  await first.record(successDelta("abcdef", "x", 1, 1));
+  await first.record({ attempts: 1, failures: 0, charsNormalEdit: 7, charsLeanEdit: 3, charsSaved: 4 });
 
   const second = new LeanEditMetricsStore(metricsPath);
   await second.loadGlobal();
@@ -58,4 +58,45 @@ test("session metrics rebuild from tool result details", async () => {
   store.rebuildSession([{ type: "message", message: { role: "toolResult", toolName: "edit", details: { leanEditMetrics: { delta: failureDelta() } } } }]);
   assert.equal(store.snapshot().session.attempts, 1);
   assert.equal(store.snapshot().session.failures, 1);
+});
+
+test("default metrics path follows PI_CODING_AGENT_DIR", () => {
+  const previousMetrics = process.env.PI_LEAN_EDIT_METRICS_PATH;
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_LEAN_EDIT_METRICS_PATH;
+  process.env.PI_CODING_AGENT_DIR = "/tmp/custom-pi-agent";
+  try {
+    assert.equal(defaultMetricsPath(), "/tmp/custom-pi-agent/pi-lean-edit/metrics.json");
+  } finally {
+    if (previousMetrics == null) delete process.env.PI_LEAN_EDIT_METRICS_PATH;
+    else process.env.PI_LEAN_EDIT_METRICS_PATH = previousMetrics;
+    if (previousAgent == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgent;
+  }
+});
+
+test("malformed numeric metric fields normalize to zero", async () => {
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
+  await fs.writeFile(metricsPath, JSON.stringify({
+    attempts: "invalid",
+    failures: null,
+    charsSaved: "Infinity",
+    charsNormalEdit: -5,
+    charsLeanEdit: 2
+  }));
+  const store = new LeanEditMetricsStore(metricsPath);
+  await store.loadGlobal();
+  assert.deepEqual(store.snapshot().global, {
+    attempts: 0,
+    failures: 0,
+    charsSaved: 0,
+    charsNormalEdit: 0,
+    charsLeanEdit: 2,
+    failureRate: 0,
+    charsUsedRate: 0,
+    charsSavedRate: 0
+  });
+  await store.record({ attempts: 1, failures: 0, charsSaved: 1, charsNormalEdit: 2, charsLeanEdit: 1 });
+  const persisted = JSON.parse(await fs.readFile(metricsPath, "utf8"));
+  assert.deepEqual(persisted, { attempts: 1, failures: 0, charsSaved: 1, charsNormalEdit: 2, charsLeanEdit: 3 });
 });

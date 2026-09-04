@@ -4,12 +4,14 @@ import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type Exte
 import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
 import { leanRead, leanReadSchema, type LeanReadResult } from "./read-tool.ts";
 import { leanEdit, leanEditSchema, prepareLeanEditArguments, StaleEditError } from "./edit-tool.ts";
+import { leanEditHugeLine, leanEditHugeLineSchema, leanReadHugeLine, leanReadHugeLineSchema } from "./huge-line-tools.ts";
 import { failureDelta, formatLeanEditStats, LeanEditMetricsStore, type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
 import { renderDiffForLeanEdit } from "./diff-render.ts";
 import { asExpansionLevel, renderWithExpansion, type ExpansionLevel } from "./render-expansion.ts";
 import { resolveCanonicalPath } from "./line-utils.ts";
 import { withInterprocessFileMutationLock } from "./file-mutation-lock.ts";
+import { SnapshotStore } from "./snapshot-store.ts";
 
 function mergeMetricsDetails(details: Record<string, any>, delta: LeanEditDelta, snapshot: LeanEditMetricsSnapshot): Record<string, any> {
   return { ...details, leanEditMetrics: { delta, snapshot } };
@@ -24,22 +26,17 @@ function diffStatMarks(count: number, mark: string, forceNumber = false): string
   return `${mark}${count}`;
 }
 
-type LeanReadCallArgs = { path?: string; offset?: number; limit?: number; columnOffset?: number };
+type LeanReadCallArgs = { path?: string; offset?: number; limit?: number; line?: number; columnOffset?: number };
 
 type LeanEditCallArgs = {
   path?: string;
+  line?: number;
   startLine?: number;
   endLine?: number;
   startColumn?: number;
   endColumn?: number;
-  edits?: Array<{
-    startLine?: number;
-    endLine?: number;
-    startColumn?: number;
-    endColumn?: number;
-  }>;
+  edits?: Array<{ startLine?: number; endLine?: number }>;
 };
-
 type TextContent = { type: "text"; text: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
 type ToolContent = TextContent | ImageContent;
@@ -59,8 +56,8 @@ type LeanEditRenderState = {
   leanEditSummaryKey?: string;
 };
 
-function renderLeanReadCall(args: LeanReadCallArgs, theme: any, context: { state: LeanReadRenderState }) {
-  let text = theme.fg("toolTitle", theme.bold("read "));
+function renderLeanReadCall(args: LeanReadCallArgs, theme: any, context: { state: LeanReadRenderState }, toolName = "read") {
+  let text = theme.fg("toolTitle", theme.bold(`${toolName} `));
   text += theme.fg("accent", args?.path ?? "");
   const summary = context?.state?.leanReadSummary;
   if (summary && summary.path === args?.path) {
@@ -68,12 +65,14 @@ function renderLeanReadCall(args: LeanReadCallArgs, theme: any, context: { state
       ? `:${summary.startLine}:${summary.startColumn}-${summary.endColumn}`
       : `:${summary.startLine}-${summary.endLine}`;
     text += theme.fg("dim", suffix);
-  } else if (args?.offset != null) {
-    const start = Number(args.offset);
-    if (args?.columnOffset != null) text += theme.fg("dim", `:${start}:${Number(args.columnOffset)}`);
-    else {
-      const end = args?.limit != null ? start + Number(args.limit) - 1 : undefined;
-      text += theme.fg("dim", `:${start}${end != null ? `-${end}` : ""}`);
+  } else {
+    const start = args?.line ?? args?.offset;
+    if (start != null) {
+      if (args?.columnOffset != null) text += theme.fg("dim", `:${Number(start)}:${Number(args.columnOffset)}`);
+      else {
+        const end = args?.limit != null ? Number(start) + Number(args.limit) - 1 : undefined;
+        text += theme.fg("dim", `:${Number(start)}${end != null ? `-${end}` : ""}`);
+      }
     }
   }
 
@@ -116,7 +115,7 @@ function renderLeanReadResult(result: ToolResult<LeanReadResult["details"]>, { e
 
   const summary = result.details?.leanRead;
   if (summary) {
-    const stateKey = JSON.stringify([summary.path, summary.linesShown, summary.startLine, summary.endLine]);
+    const stateKey = JSON.stringify([summary.path, summary.linesShown, summary.startLine, summary.endLine, summary.startColumn, summary.endColumn]);
     if (context.state.leanReadSummaryKey !== stateKey) {
       context.state.leanReadSummaryKey = stateKey;
       context.state.leanReadSummary = summary;
@@ -129,7 +128,7 @@ function renderLeanReadResult(result: ToolResult<LeanReadResult["details"]>, { e
 }
 
 function formatEditRange(edit: { startLine?: number; endLine?: number; startColumn?: number; endColumn?: number }): string | null {
-  const start = edit.startLine;
+  const start = edit.startLine ?? (edit as { line?: number }).line;
   const end = edit.endLine ?? start;
   if (start == null || end == null) return null;
   const linePart = `${start}${end !== start ? `-${end}` : ""}`;
@@ -142,8 +141,8 @@ function formatEditRanges(args: LeanEditCallArgs): string[] {
   return range ? [range] : [];
 }
 
-function renderLeanEditCall(args: LeanEditCallArgs, theme: any, context: { state: LeanEditRenderState }) {
-  let text = theme.fg("toolTitle", theme.bold("edit "));
+function renderLeanEditCall(args: LeanEditCallArgs, theme: any, context: { state: LeanEditRenderState }, toolName = "edit") {
+  let text = theme.fg("toolTitle", theme.bold(`${toolName} `));
   text += theme.fg("accent", args?.path ?? "");
   const ranges = formatEditRanges(args);
   if (ranges.length) text += theme.fg("dim", `:${ranges.join(",")}`);
@@ -220,21 +219,29 @@ export default function (pi: ExtensionAPI) {
   const renderLevel = (tool: ExpansionTool, expanded: boolean) => renderingSettings[expanded ? "expanded" : "collapsed"][tool];
   const writeTool = createWriteToolDefinition(process.cwd());
   const metrics = new LeanEditMetricsStore();
-
+  let snapshots = new SnapshotStore();
+  const recordMetrics = async (delta: LeanEditDelta): Promise<{ snapshot: LeanEditMetricsSnapshot; warning?: string }> => {
+    try {
+      return { snapshot: await metrics.record(delta) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { snapshot: metrics.snapshot(), warning: `Warning: Could not persist lean-edit metrics: ${message}` };
+    }
+  };
   pi.registerTool<typeof leanReadSchema, LeanReadResult["details"], LeanReadRenderState>({
     name: "read",
     label: "read",
-    description: "Read text file contents with line numbers or a single-line column window for huge lines. Required: path. Optional: offset and limit for line ranges; columnOffset and columnLimit only for huge-line windows. Supports jpg, png, gif, and webp images as attachments.",
-    promptSnippet: "Read file contents; path is required and all range arguments are optional.",
+    description: "Read normal text files with optional line ranges, or supported images as attachments. Huge lines are not partially snapshotted; use read_huge_line for those.",
+    promptSnippet: "Read normal file contents; path is required and offset/limit are optional.",
     promptGuidelines: [
-      "read: path is the only required argument. For normal reads, omit columnOffset and columnLimit.",
-      "read: use offset/limit to inspect exact lines you may edit.",
-      "read: use columnOffset with columnLimit only for a huge single line; omit limit or set limit=1."
+      "read: path is the only required argument.",
+      "read: use offset/limit to inspect exact full lines you may edit.",
+      "read: when a line exceeds the output limit, use read_huge_line for a bounded column window."
     ],
     parameters: leanReadSchema,
     renderShell: "default",
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const result = await leanRead(ctx.cwd, params, config, undefined, ctx?.model);
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const result = await leanRead(ctx.cwd, params, config, snapshots, ctx?.model, {}, signal);
       return { content: result.content, details: result.details };
     },
     renderCall(args, theme, context) {
@@ -250,33 +257,33 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool<typeof leanEditSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
     name: "edit",
     label: "edit",
-    description: "Edit a text file with one or more non-overlapping 1-based inclusive line or single-line column ranges.",
-    promptSnippet: "Edit ranges with { path, edits: [{ startLine, endLine?, startColumn?, endColumn?, newText }] }; use one item for a single edit.",
+    description: "Edit one or more non-overlapping inclusive full-line ranges previously shown by read.",
+    promptSnippet: "Edit full-line ranges with { path, edits: [{ startLine, endLine?, newText }] }.",
     promptGuidelines: [
       "edit: use after read for the same file/ranges; if requested text was not read or has changed, edit returns the current text without applying; retry only if that is the text you meant to replace.",
       "edit: successful replacement content can be reused immediately; deletions add no replacement rows; same-count edits preserve unaffected rows, while line-count changes conservatively invalidate old suffix coverage.",
       "edit: always use edits[]; use one item for a single edit and multiple non-overlapping items for a batch; newText: \"\" deletes.",
-      "edit: line items use startLine/endLine without columns; column items use startLine/startColumn/endColumn without endLine and may insert newlines; huge-line column edits require a matching column read."
+      "edit: ranges are full lines. Use edit_huge_line for a bounded range within a huge line."
     ],
     parameters: leanEditSchema,
     prepareArguments: prepareLeanEditArguments,
     renderShell: "default",
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       try {
-        const result = await leanEdit(ctx.cwd, params, undefined, config);
-        const snapshot = await metrics.record(result.delta);
-        const text = `${result.text}\n${statsLine(snapshot)}`;
+        const result = await leanEdit(ctx.cwd, params, snapshots, config, signal);
+        const { snapshot, warning } = await recordMetrics(result.delta);
+        const text = [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n");
         return {
           content: [{ type: "text", text }],
           details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
         };
       } catch (e) {
         const delta = failureDelta();
-        const snapshot = await metrics.record(delta);
+        const { snapshot, warning } = await recordMetrics(delta);
         const msg = e instanceof StaleEditError
           ? `${e.message}\nCurrent text:\n${e.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
           : e instanceof Error ? e.message : String(e);
-        throw new Error(`${msg}\n${statsLine(snapshot)}`);
+        throw new Error([msg, statsLine(snapshot), warning].filter(Boolean).join("\n"));
       }
     },
     renderCall(args, theme, context) {
@@ -289,11 +296,89 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.registerTool<typeof leanReadHugeLineSchema, LeanReadResult["details"], LeanReadRenderState>({
+    name: "read_huge_line",
+    label: "read_huge_line",
+    description: "Read one bounded code-point column window from a huge text line. Rejects normal-sized lines; use read for those.",
+    promptSnippet: "Read a huge-line window with { path, line, columnOffset?, columnLimit? }.",
+    promptGuidelines: [
+      "read_huge_line: use only after read reports that a line exceeds its byte limit.",
+      "read_huge_line: adjacent or overlapping windows combine into coverage for edit_huge_line."
+    ],
+    parameters: leanReadHugeLineSchema,
+    renderShell: "default",
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const result = await leanReadHugeLine(ctx.cwd, params, config, snapshots, signal);
+      return { content: result.content, details: result.details };
+    },
+    renderCall(args, theme, context) {
+      return renderWithExpansion(renderLevel("read", context.expanded), context, (adjusted) => renderLeanReadCall(args, theme, adjusted, "read_huge_line"));
+    },
+    renderResult(result, options, theme, context) {
+      return renderWithExpansion(renderLevel("read", options.expanded), context, (adjusted) =>
+        renderLeanReadResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+      );
+    }
+  });
+
+  pi.registerTool<typeof leanEditHugeLineSchema, { diff?: string; firstChangedLine?: number }, LeanEditRenderState>({
+    name: "edit_huge_line",
+    label: "edit_huge_line",
+    description: "Edit one inclusive code-point column range previously shown by read_huge_line. Replacement text must stay on one line.",
+    promptSnippet: "Edit one huge-line range with { path, line, startColumn, endColumn, newText }.",
+    promptGuidelines: [
+      "edit_huge_line: use only after read_huge_line covered the exact range.",
+      "edit_huge_line: supports one range and forbids newline insertion; empty newText deletes the range."
+    ],
+    parameters: leanEditHugeLineSchema,
+    renderShell: "default",
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      try {
+        const result = await leanEditHugeLine(ctx.cwd, params, snapshots, config, signal);
+        const { snapshot, warning } = await recordMetrics(result.delta);
+        return {
+          content: [{ type: "text", text: [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n") }],
+          details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
+        };
+      } catch (error) {
+        const delta = failureDelta();
+        const { snapshot, warning } = await recordMetrics(delta);
+        const message = error instanceof StaleEditError
+          ? `${error.message}\nCurrent text:\n${error.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
+          : error instanceof Error ? error.message : String(error);
+        throw new Error([message, statsLine(snapshot), warning].filter(Boolean).join("\n"));
+      }
+    },
+    renderCall(args, theme, context) {
+      return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderLeanEditCall(args, theme, adjusted, "edit_huge_line"));
+    },
+    renderResult(result, options, theme, context) {
+      return renderWithExpansion(renderLevel("edit", options.expanded), context, (adjusted) =>
+        renderLeanEditResult(result, { ...options, expanded: adjusted.expanded }, theme, adjusted)
+      );
+    }
+  });
+
   pi.registerTool<typeof writeTool.parameters, undefined>({
     ...writeTool,
     async execute(id, params, signal, onUpdate, ctx) {
       const canonicalPath = await resolveCanonicalPath(ctx.cwd, params.path);
-      return withInterprocessFileMutationLock(canonicalPath, () => createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx));
+      let cleanupWarning: string | undefined;
+      const result = await withInterprocessFileMutationLock(
+        canonicalPath,
+        () => createWriteToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx),
+        {
+          signal,
+          onCleanupError: (error) => {
+            cleanupWarning = `Warning: Write was applied, but the file lock could not be released cleanly: ${error instanceof Error ? error.message : String(error)}. Do not retry blindly.`;
+          }
+        }
+      );
+      if (cleanupWarning) {
+        const text = result.content.find((item) => item.type === "text");
+        if (text?.type === "text") text.text += `\n${cleanupWarning}`;
+      }
+      return result;
     },
     renderCall(args, theme, context) {
       return renderWithExpansion(renderLevel("write", context.expanded), context, (adjusted) =>
@@ -365,18 +450,26 @@ export default function (pi: ExtensionAPI) {
 
 
   pi.on("session_start", async (_event, ctx) => {
+    snapshots = new SnapshotStore();
     try {
       await loadExpansionSettings();
     } catch (error) {
       ctx.ui.notify(`Could not load lean edit settings: ${error instanceof Error ? error.message : String(error)}`, "warning");
     }
-    await metrics.loadGlobal();
+    try {
+      await metrics.loadGlobal();
+    } catch (error) {
+      ctx.ui.notify(`Could not load lean edit metrics: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
     metrics.rebuildSession(ctx.sessionManager.getBranch());
   });
 
-  pi.on("before_agent_start", async (event) => {
-    return {
-      systemPrompt: event.systemPrompt + "\n\nLean editing: read before edit; for read, path is the only required argument—use offset/limit for line ranges and columnOffset/columnLimit only for huge single-line windows. Line-count-preserving edits keep unaffected later reads valid. If requested text was not read or has changed, edit returns the current text without applying; retry the same edit only if that text is what you meant to replace. newText: \"\" deletes."
-    };
+
+  pi.on("session_tree", () => {
+    snapshots = new SnapshotStore();
+  });
+
+  pi.on("session_compact", () => {
+    snapshots = new SnapshotStore();
   });
 }

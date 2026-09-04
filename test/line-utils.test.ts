@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { codePointLength, joinText, replacementLines, replaceColumns, sliceColumns, splitText } from "../src/line-utils.ts";
+import { codePointLength, hasMixedLineEndings, joinText, replacementLines, replaceColumns, sliceColumns, splitText } from "../src/line-utils.ts";
 
 test("splitText detects CRLF and final newline", () => {
   const parsed = splitText("a\r\nb\r\n");
@@ -8,6 +8,12 @@ test("splitText detects CRLF and final newline", () => {
   assert.equal(parsed.lineEnding, "\r\n");
   assert.equal(parsed.finalNewline, true);
   assert.equal(joinText(parsed.lines, parsed.lineEnding, parsed.finalNewline), "a\r\nb\r\n");
+});
+
+test("mixed line endings are detected", () => {
+  assert.equal(hasMixedLineEndings("a\nb\n"), false);
+  assert.equal(hasMixedLineEndings("a\r\nb\r\n"), false);
+  assert.equal(hasMixedLineEndings("a\r\nb\n"), true);
 });
 
 test("replacementLines supports deletion and trailing newline", () => {

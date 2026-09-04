@@ -3,7 +3,6 @@ import { sliceColumns } from "./line-utils.ts";
 
 export type FileSnapshot = {
   path: string;
-  readAt: number;
   startLine: number;
   endLine: number;
   lines: string[];
@@ -12,29 +11,23 @@ export type FileSnapshot = {
 
 export type ColumnSnapshot = {
   path: string;
-  readAt: number;
   line: number;
   startColumn: number;
   endColumn: number;
   text: string;
   lineLength?: number;
   lineEnding: LineEnding;
-  editEligible: boolean;
 };
 
 type SnapshotSegment = Omit<FileSnapshot, "path">;
 type ColumnSnapshotSegment = Omit<ColumnSnapshot, "path">;
 
 type FileMemory = {
-  path: string;
   revision: number;
   segments: SnapshotSegment[];
   columnSegments: ColumnSnapshotSegment[];
 };
 
-function cloneSnapshot(snapshot: FileSnapshot): FileSnapshot {
-  return { ...snapshot, lines: [...snapshot.lines] };
-}
 
 function cloneSegment(segment: SnapshotSegment): SnapshotSegment {
   return { ...segment, lines: [...segment.lines] };
@@ -51,13 +44,12 @@ function segmentSlice(segment: SnapshotSegment, startLine: number, endLine: numb
 }
 
 function mergeAdjacent(segments: SnapshotSegment[]): SnapshotSegment[] {
-  const sorted = [...segments].sort((a, b) => a.startLine - b.startLine || a.readAt - b.readAt);
+  const sorted = [...segments].sort((a, b) => a.startLine - b.startLine);
   const merged: SnapshotSegment[] = [];
   for (const segment of sorted) {
     const prev = merged.at(-1);
     if (prev && prev.endLine + 1 === segment.startLine && prev.lineEnding === segment.lineEnding) {
       prev.endLine = segment.endLine;
-      prev.readAt = Math.max(prev.readAt, segment.readAt);
       prev.lines.push(...segment.lines);
     } else {
       merged.push(cloneSegment(segment));
@@ -86,13 +78,12 @@ function columnSegmentSlice(segment: ColumnSnapshotSegment, startColumn: number,
 function canMergeColumnSegments(a: ColumnSnapshotSegment, b: ColumnSnapshotSegment): boolean {
   return a.line === b.line &&
     a.lineEnding === b.lineEnding &&
-    a.editEligible === b.editEligible &&
     a.lineLength === b.lineLength &&
     b.startColumn <= a.endColumn + 1;
 }
 
 function mergeAdjacentColumns(segments: ColumnSnapshotSegment[]): ColumnSnapshotSegment[] {
-  const sorted = [...segments].sort((a, b) => a.line - b.line || a.startColumn - b.startColumn || a.readAt - b.readAt);
+  const sorted = [...segments].sort((a, b) => a.line - b.line || a.startColumn - b.startColumn);
   const merged: ColumnSnapshotSegment[] = [];
   for (const segment of sorted) {
     const prev = merged.at(-1);
@@ -100,14 +91,10 @@ function mergeAdjacentColumns(segments: ColumnSnapshotSegment[]): ColumnSnapshot
       merged.push(cloneColumnSegment(segment));
       continue;
     }
-    if (segment.endColumn <= prev.endColumn) {
-      prev.readAt = Math.max(prev.readAt, segment.readAt);
-      continue;
-    }
+    if (segment.endColumn <= prev.endColumn) continue;
     const tailStart = Math.max(prev.endColumn + 1, segment.startColumn);
     prev.text += sliceColumns(segment.text, tailStart - segment.startColumn + 1, segment.endColumn - segment.startColumn + 1);
     prev.endColumn = segment.endColumn;
-    prev.readAt = Math.max(prev.readAt, segment.readAt);
   }
   return merged;
 }
@@ -121,7 +108,7 @@ export class SnapshotStore {
   }
 
   set(snapshot: FileSnapshot): void {
-    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, revision: 0, segments: [], columnSegments: [] };
+    const memory = this.files.get(snapshot.path) ?? { revision: 0, segments: [], columnSegments: [] };
     const next: SnapshotSegment[] = [];
     for (const segment of memory.segments) {
       if (segment.endLine < snapshot.startLine || segment.startLine > snapshot.endLine) {
@@ -131,14 +118,14 @@ export class SnapshotStore {
       if (segment.startLine < snapshot.startLine) next.push(segmentSlice(segment, segment.startLine, snapshot.startLine - 1));
       if (segment.endLine > snapshot.endLine) next.push(segmentSlice(segment, snapshot.endLine + 1, segment.endLine));
     }
-    next.push({ readAt: snapshot.readAt, startLine: snapshot.startLine, endLine: snapshot.endLine, lines: [...snapshot.lines], lineEnding: snapshot.lineEnding });
+    next.push({ startLine: snapshot.startLine, endLine: snapshot.endLine, lines: [...snapshot.lines], lineEnding: snapshot.lineEnding });
     memory.segments = mergeAdjacent(next);
     memory.revision = ++this.nextRevision;
     this.files.set(snapshot.path, memory);
   }
 
   setColumns(snapshot: ColumnSnapshot): void {
-    const memory = this.files.get(snapshot.path) ?? { path: snapshot.path, revision: 0, segments: [], columnSegments: [] };
+    const memory = this.files.get(snapshot.path) ?? { revision: 0, segments: [], columnSegments: [] };
     const next: ColumnSnapshotSegment[] = [];
     for (const segment of memory.columnSegments) {
       if (segment.line !== snapshot.line || segment.endColumn < snapshot.startColumn || segment.startColumn > snapshot.endColumn) {
@@ -149,33 +136,18 @@ export class SnapshotStore {
       if (segment.endColumn > snapshot.endColumn) next.push(columnSegmentSlice(segment, snapshot.endColumn + 1, segment.endColumn));
     }
     next.push({
-      readAt: snapshot.readAt,
       line: snapshot.line,
       startColumn: snapshot.startColumn,
       endColumn: snapshot.endColumn,
       text: snapshot.text,
       lineLength: snapshot.lineLength,
-      lineEnding: snapshot.lineEnding,
-      editEligible: snapshot.editEligible
+      lineEnding: snapshot.lineEnding
     });
     memory.columnSegments = mergeAdjacentColumns(next);
     memory.revision = ++this.nextRevision;
     this.files.set(snapshot.path, memory);
   }
 
-  get(path: string): FileSnapshot | undefined {
-    const memory = this.files.get(path);
-    if (!memory || memory.segments.length === 0) return undefined;
-    const segments = memory.segments;
-    return cloneSnapshot({
-      path,
-      readAt: Math.max(...segments.map((s) => s.readAt)),
-      startLine: Math.min(...segments.map((s) => s.startLine)),
-      endLine: Math.max(...segments.map((s) => s.endLine)),
-      lines: [],
-      lineEnding: segments[0]!.lineEnding
-    });
-  }
 
   ranges(path: string): Array<{ startLine: number; endLine: number }> {
     return (this.files.get(path)?.segments ?? []).map((segment) => ({ startLine: segment.startLine, endLine: segment.endLine }));
@@ -185,9 +157,6 @@ export class SnapshotStore {
     return (this.files.get(path)?.columnSegments ?? []).map((segment) => ({ line: segment.line, startColumn: segment.startColumn, endColumn: segment.endColumn }));
   }
 
-  delete(path: string): void {
-    this.files.delete(path);
-  }
 
   invalidateRanges(path: string, ranges: Array<{ startLine: number; endLine: number }>): void {
     const memory = this.files.get(path);
@@ -233,9 +202,6 @@ export class SnapshotStore {
     memory.revision = ++this.nextRevision;
   }
 
-  clear(): void {
-    this.files.clear();
-  }
 
   covered(path: string, startLine: number, endLine: number): FileSnapshot | undefined {
     const memory = this.files.get(path);
@@ -243,7 +209,6 @@ export class SnapshotStore {
     const lines: string[] = [];
     let cursor = startLine;
     let lineEnding: LineEnding | undefined;
-    let readAt = 0;
     for (const segment of memory.segments) {
       if (segment.endLine < cursor) continue;
       if (segment.startLine > cursor) break;
@@ -251,27 +216,20 @@ export class SnapshotStore {
       const offset = cursor - segment.startLine;
       lines.push(...segment.lines.slice(offset, offset + (takeEnd - cursor + 1)));
       lineEnding ??= segment.lineEnding;
-      readAt = Math.max(readAt, segment.readAt);
       cursor = takeEnd + 1;
       if (cursor > endLine) break;
     }
     if (cursor <= endLine || !lineEnding) return undefined;
-    return { path, readAt, startLine, endLine, lines, lineEnding };
+    return { path, startLine, endLine, lines, lineEnding };
   }
 
   coveredColumns(path: string, line: number, startColumn: number, endColumn: number): ColumnSnapshot | undefined {
     const memory = this.files.get(path);
     if (!memory) return undefined;
-    let best: ColumnSnapshotSegment | undefined;
     for (const segment of memory.columnSegments) {
-      if (segment.line !== line) continue;
-      if (!segmentCoversColumns(segment, startColumn, endColumn)) continue;
-      if (!best || segment.startColumn > best.startColumn || (segment.startColumn === best.startColumn && segment.endColumn < best.endColumn) || (segment.startColumn === best.startColumn && segment.endColumn === best.endColumn && segment.readAt > best.readAt)) {
-        best = segment;
-      }
+      if (segment.line === line && segmentCoversColumns(segment, startColumn, endColumn)) return { path, ...segment };
     }
-    if (!best) return undefined;
-    return { path, ...best };
+    return undefined;
   }
 }
 
