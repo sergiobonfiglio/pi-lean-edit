@@ -201,6 +201,7 @@ export default function (pi: ExtensionAPI) {
     maxBytes: positiveIntegerEnv("PI_LEAN_EDIT_MAX_READ_BYTES", 50_000),
     maxColumns: positiveIntegerEnv("PI_LEAN_EDIT_MAX_READ_COLUMNS", 400)
   };
+  // Product feature: per-tool rendering preferences are intentionally configurable and persisted.
   const expansionTools = ["read", "edit", "write"] as const;
   const renderModes = ["collapsed", "expanded"] as const;
   type ExpansionTool = typeof expansionTools[number];
@@ -226,6 +227,7 @@ export default function (pi: ExtensionAPI) {
   };
   const renderLevel = (tool: ExpansionTool, expanded: boolean) => renderingSettings[expanded ? "expanded" : "collapsed"][tool];
   const writeTool = createWriteToolDefinition(process.cwd());
+  // Product feature: session and global savings metrics are intentionally retained across runs.
   const metrics = new LeanEditMetricsStore();
   let snapshots = new SnapshotStore();
   const recordMetrics = async (delta: LeanEditDelta): Promise<{ snapshot: LeanEditMetricsSnapshot; warning?: string }> => {
@@ -369,6 +371,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
       );
+      snapshots.clear(canonicalPath);
       if (cleanupWarning) {
         const text = result.content.find((item) => item.type === "text");
         if (text?.type === "text") text.text += `\n${cleanupWarning}`;
@@ -460,8 +463,9 @@ export default function (pi: ExtensionAPI) {
   });
 
 
-  pi.on("session_tree", () => {
+  pi.on("session_tree", (_event, ctx) => {
     snapshots = new SnapshotStore();
+    metrics.rebuildSession(ctx.sessionManager.getBranch());
   });
 
   pi.on("session_compact", () => {

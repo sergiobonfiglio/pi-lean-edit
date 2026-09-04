@@ -5,7 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import registerExtension from "../src/index.ts";
 
-function registerTools(metricsPath: string, events = new Map<string, (...args: any[]) => any>()): Map<string, any> {
+function registerTools(
+  metricsPath: string,
+  events = new Map<string, (...args: any[]) => any>(),
+  commands = new Map<string, any>()
+): Map<string, any> {
   const tools = new Map<string, any>();
   const previousMetricsPath = process.env.PI_LEAN_EDIT_METRICS_PATH;
   process.env.PI_LEAN_EDIT_METRICS_PATH = metricsPath;
@@ -14,7 +18,7 @@ function registerTools(metricsPath: string, events = new Map<string, (...args: a
       registerTool(tool: any) {
         tools.set(tool.name, tool);
       },
-      registerCommand() {},
+      registerCommand(name: string, command: any) { commands.set(name, command); },
       on(name: string, handler: (...args: any[]) => any) { events.set(name, handler); }
     } as any);
   } finally {
@@ -112,7 +116,7 @@ test("conversation context changes clear prior read snapshots", async () => {
   const tools = registerTools(path.join(dir, "metrics.json"), events);
 
   await tools.get("read").execute("read-id", { path: file }, undefined, undefined, { cwd: dir });
-  events.get("session_tree")!({}, {});
+  events.get("session_tree")!({}, { sessionManager: { getBranch: () => [] } });
   await assert.rejects(
     () => tools.get("edit").execute("edit-id", { path: file, edits: [{ startLine: 1, newText: "after" }] }, undefined, undefined, { cwd: dir }),
     /one or more requested ranges were not read beforehand/
@@ -172,4 +176,41 @@ test("extension rejects invalid read-limit environment variables", () => {
       else process.env[name] = previous;
     }
   }
+});
+
+test("write invalidates snapshots before a positional edit can target shifted duplicate text", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "file.txt");
+  await fs.writeFile(file, "x\na\n", "utf8");
+  const tools = registerTools(path.join(dir, "metrics.json"));
+  const ctx = { cwd: dir };
+  await tools.get("read").execute("read", { path: file }, undefined, undefined, ctx);
+  await tools.get("write").execute("write", { path: file, content: "y\na\na\n" }, undefined, undefined, ctx);
+  await assert.rejects(
+    () => tools.get("edit").execute("edit", { path: file, edits: [{ startLine: 2, newText: "B" }] }, undefined, undefined, ctx),
+    /not read beforehand/
+  );
+  assert.equal(await fs.readFile(file, "utf8"), "y\na\na\n");
+});
+
+test("tree navigation rebuilds session metrics from the active branch", async () => {
+  const dir = await tempDir();
+  const metricsPath = path.join(dir, "metrics.json");
+  const events = new Map<string, (...args: any[]) => any>();
+  const commands = new Map<string, any>();
+  const tools = registerTools(metricsPath, events, commands);
+  const notifications: string[] = [];
+  const ctx = {
+    cwd: dir,
+    ui: { notify: (message: string) => notifications.push(message) },
+    sessionManager: { getBranch: () => [] }
+  };
+  await events.get("session_start")!({}, ctx);
+  await tools.get("edit").execute("edit", { path: path.join(dir, "missing.txt"), edits: [{ startLine: 1, newText: "x" }] }, undefined, undefined, ctx).catch(() => {});
+  await commands.get("lean-edit-stats").handler("", ctx);
+  assert.match(notifications.at(-1)!, /session\s+1\s+1/);
+
+  events.get("session_tree")!({}, ctx);
+  await commands.get("lean-edit-stats").handler("", ctx);
+  assert.match(notifications.at(-1)!, /session\s+0\s+0/);
 });
