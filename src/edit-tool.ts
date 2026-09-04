@@ -139,7 +139,7 @@ function refreshStaleRanges(store: SnapshotStore, path: string, edits: Normalize
   const text = entries.map((entry) => entry.text).join("\n");
   if ((text ? text.split("\n").length : 0) > config.maxLines || Buffer.byteLength(text, "utf8") > config.maxBytes) return undefined;
   for (const entry of entries) {
-    store.set({ path, startLine: entry.startLine, endLine: entry.endLine, lines: entry.lines, lineEnding: parsed.lineEnding });
+    store.set({ path, startLine: entry.startLine, endLine: entry.endLine, lines: entry.lines });
   }
   return text;
 }
@@ -161,13 +161,13 @@ function invalidateSnapshotsAfterEdit(store: SnapshotStore, path: string, edits:
   if (preservedPrefixEdits.length) store.invalidateRanges(path, preservedPrefixEdits);
 }
 
-function reseedReplacements(store: SnapshotStore, path: string, edits: NormalizedEdit[], lineEnding: SplitText["lineEnding"]): void {
+function reseedReplacements(store: SnapshotStore, path: string, edits: NormalizedEdit[]): void {
   let lineDelta = 0;
   for (const edit of edits) {
     const lines = replacementLines(edit.newText);
     if (lines.length > 0) {
       const startLine = edit.startLine + lineDelta;
-      store.set({ path, startLine, endLine: startLine + lines.length - 1, lines, lineEnding });
+      store.set({ path, startLine, endLine: startLine + lines.length - 1, lines });
     }
     lineDelta += lines.length - (edit.endLine - edit.startLine + 1);
   }
@@ -232,7 +232,7 @@ export async function leanEdit(
     signal?.throwIfAborted();
     await fs.writeFile(full, after, "utf8");
     invalidateSnapshotsAfterEdit(store, full, edits);
-    reseedReplacements(store, full, edits, parsed.lineEnding);
+    reseedReplacements(store, full, edits);
 
     const labels = edits.map((edit) => edit.startLine === edit.endLine ? `${edit.startLine}` : `${edit.startLine}-${edit.endLine}`).join(",");
     return {

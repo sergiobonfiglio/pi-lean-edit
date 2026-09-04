@@ -90,8 +90,7 @@ export async function leanReadHugeLine(
     startColumn,
     endColumn: window.endColumn,
     text: window.text,
-    lineLength: window.lineLength,
-    lineEnding: parsed.lineEnding
+    lineLength: window.lineLength
   });
 
   const truncated = window.endColumn < window.lineLength;
@@ -192,8 +191,7 @@ export async function leanEditHugeLine(
         startColumn: input.startColumn,
         endColumn: input.endColumn,
         text: actual,
-        lineLength: codePointLength(line),
-        lineEnding: parsed.lineEnding
+        lineLength: codePointLength(line)
       });
       throw new StaleEditError(refreshed, initialSnapshot ? "the requested text changed since it was read" : "the requested range was not read beforehand");
     }
@@ -212,8 +210,7 @@ export async function leanEditHugeLine(
         startColumn: input.startColumn,
         endColumn: input.startColumn + replacementLength - 1,
         text: input.newText,
-        lineLength: codePointLength(nextLines[input.line - 1]!),
-        lineEnding: parsed.lineEnding
+        lineLength: codePointLength(nextLines[input.line - 1]!)
       });
     }
 

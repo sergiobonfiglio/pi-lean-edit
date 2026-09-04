@@ -220,8 +220,7 @@ export async function leanRead(
       path: full,
       startLine,
       endLine: startLine + shown.length - 1,
-      lines: shown,
-      lineEnding: parsed.lineEnding
+      lines: shown
     });
   }
 

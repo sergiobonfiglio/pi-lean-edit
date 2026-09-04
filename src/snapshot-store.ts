@@ -1,4 +1,3 @@
-import type { LineEnding } from "./line-utils.ts";
 import { sliceColumns } from "./line-utils.ts";
 
 export type FileSnapshot = {
@@ -6,7 +5,6 @@ export type FileSnapshot = {
   startLine: number;
   endLine: number;
   lines: string[];
-  lineEnding: LineEnding;
 };
 
 export type ColumnSnapshot = {
@@ -16,7 +14,6 @@ export type ColumnSnapshot = {
   endColumn: number;
   text: string;
   lineLength?: number;
-  lineEnding: LineEnding;
 };
 
 type SnapshotSegment = Omit<FileSnapshot, "path">;
@@ -48,7 +45,7 @@ function mergeAdjacent(segments: SnapshotSegment[]): SnapshotSegment[] {
   const merged: SnapshotSegment[] = [];
   for (const segment of sorted) {
     const prev = merged.at(-1);
-    if (prev && prev.endLine + 1 === segment.startLine && prev.lineEnding === segment.lineEnding) {
+    if (prev && prev.endLine + 1 === segment.startLine) {
       prev.endLine = segment.endLine;
       prev.lines.push(...segment.lines);
     } else {
@@ -77,7 +74,6 @@ function columnSegmentSlice(segment: ColumnSnapshotSegment, startColumn: number,
 
 function canMergeColumnSegments(a: ColumnSnapshotSegment, b: ColumnSnapshotSegment): boolean {
   return a.line === b.line &&
-    a.lineEnding === b.lineEnding &&
     a.lineLength === b.lineLength &&
     b.startColumn <= a.endColumn + 1;
 }
@@ -118,7 +114,7 @@ export class SnapshotStore {
       if (segment.startLine < snapshot.startLine) next.push(segmentSlice(segment, segment.startLine, snapshot.startLine - 1));
       if (segment.endLine > snapshot.endLine) next.push(segmentSlice(segment, snapshot.endLine + 1, segment.endLine));
     }
-    next.push({ startLine: snapshot.startLine, endLine: snapshot.endLine, lines: [...snapshot.lines], lineEnding: snapshot.lineEnding });
+    next.push({ startLine: snapshot.startLine, endLine: snapshot.endLine, lines: [...snapshot.lines] });
     memory.segments = mergeAdjacent(next);
     memory.revision = ++this.nextRevision;
     this.files.set(snapshot.path, memory);
@@ -140,8 +136,7 @@ export class SnapshotStore {
       startColumn: snapshot.startColumn,
       endColumn: snapshot.endColumn,
       text: snapshot.text,
-      lineLength: snapshot.lineLength,
-      lineEnding: snapshot.lineEnding
+      lineLength: snapshot.lineLength
     });
     memory.columnSegments = mergeAdjacentColumns(next);
     memory.revision = ++this.nextRevision;
@@ -208,19 +203,17 @@ export class SnapshotStore {
     if (!memory) return undefined;
     const lines: string[] = [];
     let cursor = startLine;
-    let lineEnding: LineEnding | undefined;
     for (const segment of memory.segments) {
       if (segment.endLine < cursor) continue;
       if (segment.startLine > cursor) break;
       const takeEnd = Math.min(segment.endLine, endLine);
       const offset = cursor - segment.startLine;
       lines.push(...segment.lines.slice(offset, offset + (takeEnd - cursor + 1)));
-      lineEnding ??= segment.lineEnding;
       cursor = takeEnd + 1;
       if (cursor > endLine) break;
     }
-    if (cursor <= endLine || !lineEnding) return undefined;
-    return { path, startLine, endLine, lines, lineEnding };
+    if (cursor <= endLine) return undefined;
+    return { path, startLine, endLine, lines };
   }
 
   coveredColumns(path: string, line: number, startColumn: number, endColumn: number): ColumnSnapshot | undefined {

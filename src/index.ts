@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createWriteToolDefinition, getAgentDir, getSettingsListTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, getCapabilities, getImageDimensions, imageFallback, type SettingItem } from "@earendil-works/pi-tui";
 import { leanRead, leanReadSchema, type LeanReadResult } from "./read-tool.ts";
-import { leanEdit, leanEditSchema, prepareLeanEditArguments, StaleEditError } from "./edit-tool.ts";
+import { leanEdit, leanEditSchema, prepareLeanEditArguments, StaleEditError, type LeanEditResult } from "./edit-tool.ts";
 import { leanEditHugeLine, leanEditHugeLineSchema, leanReadHugeLine, leanReadHugeLineSchema } from "./huge-line-tools.ts";
 import { failureDelta, formatLeanEditStats, LeanEditMetricsStore, type LeanEditDelta, type LeanEditMetricsSnapshot } from "./metrics.ts";
 import { diffStat } from "./diff.ts";
@@ -228,6 +228,22 @@ export default function (pi: ExtensionAPI) {
       return { snapshot: metrics.snapshot(), warning: `Warning: Could not persist lean-edit metrics: ${message}` };
     }
   };
+  const executeEdit = async (run: () => Promise<LeanEditResult>) => {
+    try {
+      const result = await run();
+      const { snapshot, warning } = await recordMetrics(result.delta);
+      return {
+        content: [{ type: "text" as const, text: [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n") }],
+        details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
+      };
+    } catch (error) {
+      const { snapshot, warning } = await recordMetrics(failureDelta());
+      const message = error instanceof StaleEditError
+        ? `${error.message}\nCurrent text:\n${error.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
+        : error instanceof Error ? error.message : String(error);
+      throw new Error([message, statsLine(snapshot), warning].filter(Boolean).join("\n"));
+    }
+  };
   pi.registerTool<typeof leanReadSchema, LeanReadResult["details"], LeanReadRenderState>({
     name: "read",
     label: "read",
@@ -269,22 +285,7 @@ export default function (pi: ExtensionAPI) {
     prepareArguments: prepareLeanEditArguments,
     renderShell: "default",
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try {
-        const result = await leanEdit(ctx.cwd, params, snapshots, config, signal);
-        const { snapshot, warning } = await recordMetrics(result.delta);
-        const text = [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n");
-        return {
-          content: [{ type: "text", text }],
-          details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
-        };
-      } catch (e) {
-        const delta = failureDelta();
-        const { snapshot, warning } = await recordMetrics(delta);
-        const msg = e instanceof StaleEditError
-          ? `${e.message}\nCurrent text:\n${e.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
-          : e instanceof Error ? e.message : String(e);
-        throw new Error([msg, statsLine(snapshot), warning].filter(Boolean).join("\n"));
-      }
+      return executeEdit(() => leanEdit(ctx.cwd, params, snapshots, config, signal));
     },
     renderCall(args, theme, context) {
       return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderLeanEditCall(args, theme, adjusted));
@@ -333,21 +334,7 @@ export default function (pi: ExtensionAPI) {
     parameters: leanEditHugeLineSchema,
     renderShell: "default",
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try {
-        const result = await leanEditHugeLine(ctx.cwd, params, snapshots, config, signal);
-        const { snapshot, warning } = await recordMetrics(result.delta);
-        return {
-          content: [{ type: "text", text: [result.text, statsLine(snapshot), result.warning, warning].filter(Boolean).join("\n") }],
-          details: mergeMetricsDetails({ diff: result.diff, firstChangedLine: result.firstChangedLine }, result.delta, snapshot)
-        };
-      } catch (error) {
-        const delta = failureDelta();
-        const { snapshot, warning } = await recordMetrics(delta);
-        const message = error instanceof StaleEditError
-          ? `${error.message}\nCurrent text:\n${error.refreshedText}\nIf this is the text you meant to replace, retry the same edit.`
-          : error instanceof Error ? error.message : String(error);
-        throw new Error([message, statsLine(snapshot), warning].filter(Boolean).join("\n"));
-      }
+      return executeEdit(() => leanEditHugeLine(ctx.cwd, params, snapshots, config, signal));
     },
     renderCall(args, theme, context) {
       return renderWithExpansion(renderLevel("edit", context.expanded), context, (adjusted) => renderLeanEditCall(args, theme, adjusted, "edit_huge_line"));
