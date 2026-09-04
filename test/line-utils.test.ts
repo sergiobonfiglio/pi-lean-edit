@@ -16,9 +16,10 @@ test("mixed line endings are detected", () => {
   assert.equal(hasMixedLineEndings("a\r\nb\n"), true);
 });
 
-test("replacementLines supports deletion and trailing newline", () => {
+test("replacementLines supports deletion and normalizes line endings", () => {
   assert.deepEqual(replacementLines(""), []);
   assert.deepEqual(replacementLines("x\ny\n"), ["x", "y"]);
+  assert.deepEqual(replacementLines("x\r\ny\r"), ["x", "y"]);
 });
 
 test("column slicing uses code points", () => {

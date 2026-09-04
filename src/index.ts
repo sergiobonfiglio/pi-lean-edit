@@ -187,11 +187,19 @@ function statsLine(snapshot: LeanEditMetricsSnapshot): string {
   return `lean_edit session saved=${snapshot.session.charsSaved} failure=${(snapshot.session.failureRate * 100).toFixed(1)}% global saved=${snapshot.global.charsSaved} failure=${(snapshot.global.failureRate * 100).toFixed(1)}%`;
 }
 
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value == null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+}
+
 export default function (pi: ExtensionAPI) {
   const config = {
-    maxLines: Number(process.env.PI_LEAN_EDIT_MAX_READ_LINES ?? 2000),
-    maxBytes: Number(process.env.PI_LEAN_EDIT_MAX_READ_BYTES ?? 50_000),
-    maxColumns: Number(process.env.PI_LEAN_EDIT_MAX_READ_COLUMNS ?? 400)
+    maxLines: positiveIntegerEnv("PI_LEAN_EDIT_MAX_READ_LINES", 2000),
+    maxBytes: positiveIntegerEnv("PI_LEAN_EDIT_MAX_READ_BYTES", 50_000),
+    maxColumns: positiveIntegerEnv("PI_LEAN_EDIT_MAX_READ_COLUMNS", 400)
   };
   const expansionTools = ["read", "edit", "write"] as const;
   const renderModes = ["collapsed", "expanded"] as const;

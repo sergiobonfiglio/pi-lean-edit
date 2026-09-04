@@ -199,6 +199,13 @@ test("CRLF preserved", async () => {
   await expectFile(session, "a\r\nB\r\nc\r\n");
 });
 
+test("bare carriage returns in replacement text become line endings", async () => {
+  const session = await createSession("a");
+  await leanRead(session.dir, { path: session.file }, config, session.store);
+  await leanEdit(session.dir, { path: session.file, startLine: 1, newText: "A\r" }, session.store);
+  await expectFile(session, "A\n");
+});
+
 test("mixed line endings are rejected without changing the file", async () => {
   const content = "a\r\nb\nc";
   const session = await createSession(content);

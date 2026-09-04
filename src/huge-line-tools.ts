@@ -36,23 +36,25 @@ function isHugeLine(lineNumber: number, line: string, maxBytes: number): boolean
 }
 
 function fitColumnWindow(lineNumber: number, line: string, startColumn: number, maxColumns: number, byteBudget: number): { endColumn: number; text: string; lineLength: number } {
-  const points = Array.from(line);
-  const lineLength = points.length;
-  if (startColumn > lineLength) throw new Error(`columnOffset ${startColumn} exceeds line ${lineNumber} length ${lineLength}`);
   const selected: string[] = [];
   let selectedBytes = 0;
   let endColumn = startColumn - 1;
-  const maxTake = Math.min(maxColumns, lineLength - startColumn + 1);
-  for (let take = 1; take <= maxTake; take++) {
-    const point = points[startColumn + take - 2]!;
-    const candidateEnd = startColumn + take - 1;
+  let lineLength = 0;
+  let budgetExhausted = false;
+  for (const point of line) {
+    lineLength++;
+    if (lineLength < startColumn || selected.length >= maxColumns || budgetExhausted) continue;
     const candidateBytes = selectedBytes + Buffer.byteLength(point, "utf8");
-    const prefixBytes = Buffer.byteLength(formatColumnLine(lineNumber, startColumn, candidateEnd, ""), "utf8");
-    if (prefixBytes + candidateBytes > byteBudget) break;
+    const prefixBytes = Buffer.byteLength(formatColumnLine(lineNumber, startColumn, lineLength, ""), "utf8");
+    if (prefixBytes + candidateBytes > byteBudget) {
+      budgetExhausted = true;
+      continue;
+    }
     selected.push(point);
     selectedBytes = candidateBytes;
-    endColumn = candidateEnd;
+    endColumn = lineLength;
   }
+  if (startColumn > lineLength) throw new Error(`columnOffset ${startColumn} exceeds line ${lineNumber} length ${lineLength}`);
   if (selected.length === 0) throw new Error("configured read byte limit is too small for this column window");
   return { endColumn, text: selected.join(""), lineLength };
 }

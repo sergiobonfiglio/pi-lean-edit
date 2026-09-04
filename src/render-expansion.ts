@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 export type ExpansionLevel = "minimal" | "medium" | "full";
 
@@ -14,9 +14,9 @@ class CappedComponent implements Component {
 
   render(width: number): string[] {
     const lines = this.child.render(width);
-    return lines.length <= MEDIUM_MAX_LINES
-      ? lines
-      : [...lines.slice(0, MEDIUM_MAX_LINES - 1), `… ${lines.length - MEDIUM_MAX_LINES + 1} more lines`];
+    if (lines.length <= MEDIUM_MAX_LINES) return lines;
+    const summary = `… ${lines.length - MEDIUM_MAX_LINES + 1} more lines`;
+    return [...lines.slice(0, MEDIUM_MAX_LINES - 1), truncateToWidth(summary, width, "")];
   }
 
   handleInput?(data: string): void {

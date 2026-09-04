@@ -54,8 +54,9 @@ export function hasMixedLineEndings(text: string): boolean {
 }
 export function replacementLines(newText: string): string[] {
   if (newText.length === 0) return [];
-  const lines = newText.replace(/\r\n/g, "\n").split("\n");
-  if (newText.endsWith("\n")) lines.pop();
+  const normalized = newText.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  if (normalized.endsWith("\n")) lines.pop();
   return lines;
 }
 
@@ -77,21 +78,37 @@ export function formatNumberedLines(lines: string[], startLine: number): string 
   return lines.map((line, i) => `${startLine + i} │ ${line}`).join("\n");
 }
 
-export function codePoints(text: string): string[] {
-  return Array.from(text);
+export function codePointLength(text: string): number {
+  let length = 0;
+  for (const _point of text) length++;
+  return length;
 }
 
-export function codePointLength(text: string): number {
-  return codePoints(text).length;
+function columnOffsets(text: string, startColumn: number, endColumn: number): { start: number; end: number } {
+  let start = text.length;
+  let end = text.length;
+  let column = 1;
+  let offset = 0;
+  for (const point of text) {
+    if (column === startColumn) start = offset;
+    offset += point.length;
+    if (column === endColumn) {
+      end = offset;
+      break;
+    }
+    column++;
+  }
+  return { start, end };
 }
 
 export function sliceColumns(text: string, startColumn: number, endColumn: number): string {
-  return codePoints(text).slice(startColumn - 1, endColumn).join("");
+  const offsets = columnOffsets(text, startColumn, endColumn);
+  return text.slice(offsets.start, offsets.end);
 }
 
 export function replaceColumns(text: string, startColumn: number, endColumn: number, newText: string): string {
-  const cps = codePoints(text);
-  return [...cps.slice(0, startColumn - 1), newText, ...cps.slice(endColumn)].join("");
+  const offsets = columnOffsets(text, startColumn, endColumn);
+  return text.slice(0, offsets.start) + newText + text.slice(offsets.end);
 }
 
 export function formatColumnLine(line: number, startColumn: number, endColumn: number, text: string): string {

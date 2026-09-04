@@ -63,15 +63,18 @@ export function failureDelta(): LeanEditDelta {
   return { attempts: 1, failures: 1, charsSaved: 0, charsNormalEdit: 0, charsLeanEdit: 0 };
 }
 
-export function getLeanEditDelta(details: any, toolName?: string): LeanEditDelta {
+export function getLeanEditDelta(details: any, toolName?: string, isError = false): LeanEditDelta {
   const delta = details?.leanEditMetrics?.delta;
-  if (!delta && toolName !== "edit" && toolName !== "edit_huge_line") return { ...ZERO };
+  if (!delta) {
+    const isLeanEdit = toolName === "edit" || toolName === "edit_huge_line";
+    return isLeanEdit && isError ? failureDelta() : { ...ZERO };
+  }
   return {
-    attempts: nonNegativeFinite(delta?.attempts),
-    failures: nonNegativeFinite(delta?.failures),
-    charsSaved: nonNegativeFinite(delta?.charsSaved),
-    charsNormalEdit: nonNegativeFinite(delta?.charsNormalEdit),
-    charsLeanEdit: nonNegativeFinite(delta?.charsLeanEdit)
+    attempts: nonNegativeFinite(delta.attempts),
+    failures: nonNegativeFinite(delta.failures),
+    charsSaved: nonNegativeFinite(delta.charsSaved),
+    charsNormalEdit: nonNegativeFinite(delta.charsNormalEdit),
+    charsLeanEdit: nonNegativeFinite(delta.charsLeanEdit)
   };
 }
 
@@ -118,7 +121,7 @@ export class LeanEditMetricsStore {
       if (entry?.type !== "message") continue;
       const message = entry.message;
       if (message?.role !== "toolResult") continue;
-      add(this.sessionCounters, getLeanEditDelta(message.details, message.toolName));
+      add(this.sessionCounters, getLeanEditDelta(message.details, message.toolName, message.isError));
     }
   }
 

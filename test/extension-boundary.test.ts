@@ -156,3 +156,20 @@ test("registered read and edit honor aborted signals", async () => {
   );
   assert.equal(await fs.readFile(file, "utf8"), "before\n");
 });
+
+test("extension rejects invalid read-limit environment variables", () => {
+  for (const name of [
+    "PI_LEAN_EDIT_MAX_READ_LINES",
+    "PI_LEAN_EDIT_MAX_READ_BYTES",
+    "PI_LEAN_EDIT_MAX_READ_COLUMNS"
+  ]) {
+    const previous = process.env[name];
+    process.env[name] = "0";
+    try {
+      assert.throws(() => registerExtension({} as any), new RegExp(`${name} must be a positive integer`));
+    } finally {
+      if (previous == null) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  }
+});

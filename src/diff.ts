@@ -18,8 +18,13 @@ export function firstChangedLine(oldText: string, newText: string): number | und
 export function diffStat(diff: string): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
+  let inHunk = false;
   for (const line of diff.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("@@")) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
     if (line.startsWith("+")) added++;
     else if (line.startsWith("-")) removed++;
   }

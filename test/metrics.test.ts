@@ -60,6 +60,18 @@ test("session metrics rebuild from tool result details", async () => {
   assert.equal(store.snapshot().session.failures, 1);
 });
 
+test("session metrics rebuild failed edit results without details", async () => {
+  const metricsPath = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pi-lean-edit-metrics-")), "metrics.json");
+  const store = new LeanEditMetricsStore(metricsPath);
+  store.rebuildSession([
+    { type: "message", message: { role: "toolResult", toolName: "edit", isError: true } },
+    { type: "message", message: { role: "toolResult", toolName: "edit_huge_line", isError: true } },
+    { type: "message", message: { role: "toolResult", toolName: "read", isError: true } }
+  ]);
+  assert.equal(store.snapshot().session.attempts, 2);
+  assert.equal(store.snapshot().session.failures, 2);
+});
+
 test("default metrics path follows PI_CODING_AGENT_DIR", () => {
   const previousMetrics = process.env.PI_LEAN_EDIT_METRICS_PATH;
   const previousAgent = process.env.PI_CODING_AGENT_DIR;

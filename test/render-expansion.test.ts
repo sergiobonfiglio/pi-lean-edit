@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Component } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { asExpansionLevel, renderWithExpansion } from "../src/render-expansion.ts";
 
 class Lines implements Component {
@@ -28,6 +28,7 @@ test("expansion levels select collapsed, capped, and full rendering", () => {
     return child;
   });
   assert.deepEqual(medium.render(80), [...Array.from({ length: 19 }, (_, index) => String(index + 1)), "… 6 more lines"]);
+  assert.ok(visibleWidth(medium.render(5).at(-1)!) <= 5);
   renderWithExpansion("medium", { ...context, lastComponent: medium }, (adjusted) => {
     assert.equal(adjusted.lastComponent, child);
     return child;

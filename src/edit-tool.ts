@@ -227,7 +227,7 @@ export async function leanEdit(
     for (const edit of [...edits].reverse()) {
       nextLines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, ...replacementLines(edit.newText));
     }
-    const hasFinalEmptyReplacementRow = edits.some((edit) => edit.endLine === parsed.lines.length && /\n$/.test(edit.newText));
+    const hasFinalEmptyReplacementRow = edits.some((edit) => edit.endLine === parsed.lines.length && /[\r\n]$/.test(edit.newText));
     const after = joinText(nextLines, parsed.lineEnding, parsed.finalNewline || hasFinalEmptyReplacementRow);
     signal?.throwIfAborted();
     await fs.writeFile(full, after, "utf8");
